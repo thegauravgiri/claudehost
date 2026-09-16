@@ -1,0 +1,69 @@
+# claudebox has full bash/file access via Claude Code - never publish its port.
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  litellm:
+    build:
+      context: .
+      dockerfile: docker/litellm.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@db:5432/litellm
+      STORE_MODEL_IN_DB: "True"
+      CLAUDEBOX_API_MODE_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
+    depends_on:
+      db:
+        condition: service_healthy
+      claudebox:
+        condition: service_started
+    networks:
+      - backend
+
+  claudebox:
+    # latest/v2.4.2 crash-loop (packaging bug, ImportError on startup). v2.3.9 works.
+    image: psyb0t/claudebox:v2.3.9
+    restart: unless-stopped
+    environment:
+      CLAUDEBOX_API_MODE: "1"
+      CLAUDEBOX_API_MODE_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      CLAUDEBOX_GIT_NAME: ${CLAUDEBOX_GIT_NAME}
+      CLAUDEBOX_GIT_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
+    volumes:
+      - claude_auth:/home/aicode/.claude
+      - ./ssh:/home/aicode/.ssh/claudebox:ro
+      - ./workspaces:/workspace
+    # cap_drop: ALL breaks the entrypoint (needs CAP_DAC_OVERRIDE for /home/aicode setup)
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 512
+    networks:
+      - backend
+
+networks:
+  backend:
+
+volumes:
+  postgres_data:
+  claude_auth:
