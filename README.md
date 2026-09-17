@@ -30,6 +30,7 @@ authenticated with your own Claude subscription or API key.
 ## Table of contents
 
 - [Architecture](#architecture)
+- [Available models and effort levels](#available-models-and-effort-levels)
 - [Cost control: subscription vs. metered API](#cost-control-subscription-vs-metered-api)
 - [How workspace routing works](#how-workspace-routing-works)
 - [Security notes](#security-notes)
@@ -51,6 +52,26 @@ developer -> litellm :4000 (published, virtual keys, spend tracking)
 Only `litellm`'s port is published. `claudebox` grants real bash/file access
 via Claude Code, so it's reachable solely on the internal compose network.
 
+## Available models and effort levels
+
+Four models are configured, matching everything the pinned `claudebox`
+adapter supports: `claude-haiku`, `claude-sonnet`, `claude-opus`, and
+`claude-opusplan` (a hybrid mode: Opus plans, Sonnet executes).
+
+Claude Code also supports a `--effort` level (`low`, `medium`, `high`,
+`xhigh`, `max`) controlling how much it thinks before answering. The OpenAI
+`reasoning_effort` request field is accepted by claudebox's API but not
+wired to that flag in the pinned version, so it's silently ignored. The
+working path is claudebox's generic CLI passthrough header instead:
+
+```python
+client.chat.completions.create(
+    model="claude-sonnet",
+    messages=[{"role": "user", "content": "..."}],
+    extra_headers={"X-Aicodebox-Extra-Args": '["--effort", "high"]'},
+)
+```
+
 ## Cost control: subscription vs. metered API
 
 Buying an Anthropic API key means metered, pay-per-token billing: the bill
@@ -58,6 +79,14 @@ scales with every request every developer makes, and a busy week can spike
 costs unpredictably. Routing the same traffic through a Claude Pro/Max
 subscription instead gives you a single fixed monthly price for the whole
 team, run through infrastructure you already control.
+
+LiteLLM still tracks spend per virtual key for visibility, as shadow pricing:
+each model's `pricing_ref` in [`config/litellm_config.yaml`](config/litellm_config.yaml)
+names the real Anthropic model to price it like, and
+[`docker/render_pricing.py`](docker/render_pricing.py) resolves that to actual
+per-token rates from LiteLLM's own bundled cost map at image build time.
+Nobody hand-types prices, and a rebuild picks up whatever rates ship with the
+pinned `litellm` image.
 
 The tradeoff is capacity, not cost: a subscription has its own usage caps and
 rate limits, shared across everyone calling the gateway, and Anthropic's
@@ -165,7 +194,7 @@ LiteLLM strips unrecognized headers by default.
    curl -X POST http://localhost:4000/key/generate \
      -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
      -H "Content-Type: application/json" \
-     -d '{"models": ["claude-haiku", "claude-sonnet", "claude-opus"]}'
+     -d '{"models": ["claude-haiku", "claude-sonnet", "claude-opus", "claude-opusplan"]}'
    ```
 
 6. **Test**
@@ -204,6 +233,10 @@ LiteLLM strips unrecognized headers by default.
   '/home/aicode': Permission denied`**: don't run it with `read_only: true`
   or `cap_drop: ALL`; its entrypoint needs to write to `/home/aicode` as root
   (via `CAP_DAC_OVERRIDE`) before dropping privileges.
+- **`reasoning_effort` in a request has no effect**: the pinned claudebox
+  adapter accepts but doesn't wire that field to Claude Code's `--effort`
+  flag. Use the `X-Aicodebox-Extra-Args` header workaround instead (see
+  [Available models and effort levels](#available-models-and-effort-levels)).
 
 ## Contributing
 
