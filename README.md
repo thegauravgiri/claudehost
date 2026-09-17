@@ -2,7 +2,7 @@
 
 **Turn a Claude Code subscription into an API.** claudehost converts your
 Claude Pro/Max subscription (or an Anthropic API key) into a self-hosted,
-OpenAI-compatible API endpoint — no per-token billing, no hand-built wrapper,
+OpenAI-compatible API endpoint: no per-token billing, no hand-built wrapper,
 just Docker Compose and a shared gateway your whole team can call.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -12,10 +12,14 @@ just Docker Compose and a shared gateway your whole team can call.
 
 Point any OpenAI SDK / client at the converted API and get both:
 
-- **Chat completions** — ordinary prompt-in, text-out calls against Claude models.
-- **Agentic coding tasks** — "run the tests and fix failures," "add this
-  feature," "review this diff" — executed for real against a mounted repo,
+- **Chat completions**: ordinary prompt-in, text-out calls against Claude models.
+- **Agentic coding tasks**: "run the tests and fix failures," "add this
+  feature," "review this diff," executed for real against a mounted repo,
   with the same Claude Code bash/file-edit tools you get from the CLI.
+- **Flat-rate cost control**: a whole team calls the gateway against one
+  Claude Pro/Max subscription's fixed monthly price, instead of buying and
+  metering an Anthropic API key whose bill scales with every token every
+  developer uses.
 
 Per-developer usage tracking, budgets, and virtual API keys are handled by
 [LiteLLM](https://docs.litellm.ai/); the subscription-to-API conversion itself
@@ -26,6 +30,7 @@ authenticated with your own Claude subscription or API key.
 ## Table of contents
 
 - [Architecture](#architecture)
+- [Cost control: subscription vs. metered API](#cost-control-subscription-vs-metered-api)
 - [How workspace routing works](#how-workspace-routing-works)
 - [Security notes](#security-notes)
 - [Prerequisites](#prerequisites)
@@ -46,13 +51,29 @@ developer -> litellm :4000 (published, virtual keys, spend tracking)
 Only `litellm`'s port is published. `claudebox` grants real bash/file access
 via Claude Code, so it's reachable solely on the internal compose network.
 
+## Cost control: subscription vs. metered API
+
+Buying an Anthropic API key means metered, pay-per-token billing: the bill
+scales with every request every developer makes, and a busy week can spike
+costs unpredictably. Routing the same traffic through a Claude Pro/Max
+subscription instead gives you a single fixed monthly price for the whole
+team, run through infrastructure you already control.
+
+The tradeoff is capacity, not cost: a subscription has its own usage caps and
+rate limits, shared across everyone calling the gateway, and Anthropic's
+consumer-plan terms are written around individual use rather than a team
+reselling access to it through an API (see [Security notes](#security-notes)).
+For a small-to-medium team's day-to-day usage this is usually a better deal
+than metered billing; for high, bursty, or compliance-sensitive workloads,
+set `ANTHROPIC_API_KEY` instead and pay per token.
+
 ## How workspace routing works
 
-There's no separate "chat mode" vs "agent mode" toggle — every request goes
+There's no separate "chat mode" vs "agent mode" toggle: every request goes
 through the same Claude Code session. What changes is which workspace it's
 pointed at, via the `X-Aicodebox-Workspace` request header:
 
-- Omit it for plain Q&A/completions — no file/repo context.
+- Omit it for plain Q&A/completions, no file/repo context.
 - Set it to a project name (`./workspaces/<name>` on the host, `/workspace/<name>`
   in the container) for a session with real file/bash access to that checkout.
 
@@ -65,7 +86,7 @@ client.chat.completions.create(
 ```
 
 This requires `forward_client_headers_to_llm_api: true` in
-[`config/litellm_config.yaml`](config/litellm_config.yaml) (already set) —
+[`config/litellm_config.yaml`](config/litellm_config.yaml) (already set):
 LiteLLM strips unrecognized headers by default.
 
 ## Security notes
@@ -73,7 +94,7 @@ LiteLLM strips unrecognized headers by default.
 - **Read [claudebox's source](https://github.com/psyb0t/docker-claudebox)
   before trusting it with your subscription token and shell access.** It runs
   Claude Code with `--permission-mode bypassPermissions` and passwordless
-  sudo — any request that reaches it can run arbitrary commands in whatever
+  sudo, so any request that reaches it can run arbitrary commands in whatever
   workspace it's pointed at. It's a small, single-maintainer project with no
   independent security audit; the source itself is clean (no telemetry, no
   obfuscation, no unexpected network calls), but treat it like any small OSS
@@ -81,12 +102,12 @@ LiteLLM strips unrecognized headers by default.
 - `CLAUDE_CODE_OAUTH_TOKEN` ties every developer's traffic to one Claude
   Pro/Max subscription's usage caps and rate limits, and Anthropic's
   consumer-plan terms are written around individual use, not a team reselling
-  access to it through an API — a deliberate tradeoff for cost, not a
+  access to it through an API. That's a deliberate tradeoff for cost, not a
   compliance-cleared setup. Swap for `ANTHROPIC_API_KEY` (in `.env` and
-  `docker-compose.yml`) if you need metered, ToS-clean billing instead —
+  `docker-compose.yml`) if you need metered, ToS-clean billing instead;
   `claudebox` supports both.
 - Put `litellm`'s published port behind TLS and restrict it to your VPN/office
-  IP range before calling this production — the compose file itself does no
+  IP range before calling this production. The compose file itself does no
   network restriction beyond not publishing `claudebox`.
 
 ## Prerequisites
@@ -173,20 +194,20 @@ LiteLLM strips unrecognized headers by default.
 ## Troubleshooting
 
 - **`claudebox` crash-loops with `ImportError: cannot import name
-  'parse_native_event_lines'`** — a packaging bug in `psyb0t/claudebox:latest`
+  'parse_native_event_lines'`**: a packaging bug in `psyb0t/claudebox:latest`
   and `:v2.4.2`. This repo pins `:v2.3.9`, which is confirmed working; don't
   bump the tag without testing it first.
-- **`workspace` isn't reaching claudebox** — this pinned version only reads
+- **`workspace` isn't reaching claudebox**: this pinned version only reads
   workspace selection from the `X-Aicodebox-Workspace` header, not a
   `workspace` body field. Use `extra_headers`, not `extra_body`.
 - **claudebox fails to start with `mkdir: cannot create directory
-  '/home/aicode': Permission denied`** — don't run it with `read_only: true`
+  '/home/aicode': Permission denied`**: don't run it with `read_only: true`
   or `cap_drop: ALL`; its entrypoint needs to write to `/home/aicode` as root
   (via `CAP_DAC_OVERRIDE`) before dropping privileges.
 
 ## Contributing
 
-Issues and PRs welcome — this is a small, actively-used internal tool rather
+Issues and PRs welcome. This is a small, actively-used internal tool rather
 than a large OSS project, so keep changes scoped and explain the "why."
 
 ## License
