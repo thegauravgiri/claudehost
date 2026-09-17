@@ -1,16 +1,16 @@
 # claudehost
 
-**Self-hosted LiteLLM gateway for Claude Code** — an OpenAI-compatible API,
-backed by Docker Compose, that turns a Claude Pro/Max subscription (or an
-Anthropic API key) into a shared endpoint for both plain chat completions and
-full agentic coding sessions (real bash/file access against a repo checkout).
+**Turn a Claude Code subscription into an API.** claudehost converts your
+Claude Pro/Max subscription (or an Anthropic API key) into a self-hosted,
+OpenAI-compatible API endpoint — no per-token billing, no hand-built wrapper,
+just Docker Compose and a shared gateway your whole team can call.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker Compose](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-agentic-D97757)](https://github.com/psyb0t/docker-claudebox)
 [![LiteLLM](https://img.shields.io/badge/gateway-LiteLLM-6C5CE7)](https://docs.litellm.ai/)
 
-Point any OpenAI SDK / client at one gateway and get both:
+Point any OpenAI SDK / client at the converted API and get both:
 
 - **Chat completions** — ordinary prompt-in, text-out calls against Claude models.
 - **Agentic coding tasks** — "run the tests and fix failures," "add this
@@ -18,11 +18,10 @@ Point any OpenAI SDK / client at one gateway and get both:
   with the same Claude Code bash/file-edit tools you get from the CLI.
 
 Per-developer usage tracking, budgets, and virtual API keys are handled by
-[LiteLLM](https://docs.litellm.ai/); the actual model calls are handled by a
-containerized [Claude Code](https://claude.com/claude-code) session via
-[claudebox](https://github.com/psyb0t/docker-claudebox), authenticated with
-your own Claude subscription or API key — no separate hand-built API wrapper
-required.
+[LiteLLM](https://docs.litellm.ai/); the subscription-to-API conversion itself
+is handled by a containerized [Claude Code](https://claude.com/claude-code)
+session via [claudebox](https://github.com/psyb0t/docker-claudebox),
+authenticated with your own Claude subscription or API key.
 
 ## Table of contents
 
