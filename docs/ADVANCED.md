@@ -9,6 +9,7 @@ full security notes, config reference, and troubleshooting.
 - [Available models and effort levels](#available-models-and-effort-levels)
 - [Cost control: subscription vs. metered API](#cost-control-subscription-vs-metered-api)
 - [How workspace routing works](#how-workspace-routing-works)
+  - [Concurrency: why omitting the header is now safe](#concurrency-why-omitting-the-header-is-now-safe)
   - [Git access for agentic sessions](#git-access-for-agentic-sessions)
 - [Per-developer instances](#per-developer-instances)
 - [Security notes](#security-notes)
@@ -66,9 +67,10 @@ There's no separate "chat mode" vs "agent mode" toggle: every request goes
 through the same Claude Code session. What changes is which workspace it's
 pointed at, via the `X-Aicodebox-Workspace` request header:
 
-- Omit it for plain Q&A/completions, no file/repo context.
 - Set it to a project name (`./workspaces/<name>` on the host, `/workspace/<name>`
   in the container) for a session with real file/bash access to that checkout.
+- Omit it for plain Q&A/completions with no file/repo context - see below for
+  what actually happens when you do.
 
 ```python
 client.chat.completions.create(
@@ -81,6 +83,30 @@ client.chat.completions.create(
 This requires `forward_client_headers_to_llm_api: true` in
 [`config/litellm_config.yaml`](../config/litellm_config.yaml) (already set):
 LiteLLM strips unrecognized headers by default.
+
+### Concurrency: why omitting the header is now safe
+
+claudebox allows only one active Claude Code process per workspace, and
+rejects (doesn't queue) a concurrent request to the same one with `409
+workspace busy` (see [Troubleshooting](#troubleshooting)). Every request
+that omits `X-Aicodebox-Workspace` used to land on the same default
+workspace, so concurrent stateless traffic (a chatbot, a code-review agent
+firing off parallel calls) would collide and start failing under load.
+
+[`docker/auto_workspace_callback.py`](../docker/auto_workspace_callback.py)
+fixes this at the gateway: a LiteLLM pre-call hook that assigns a random,
+throwaway workspace to any request that doesn't already specify one, so
+purely stateless callers get automatic isolation with zero client-side
+changes. Requests that *do* set `X-Aicodebox-Workspace` themselves (real
+agentic sessions against a real project) are left untouched - the hook
+only acts when the header is absent. It's registered via
+`litellm_settings.callbacks` in
+[`config/litellm_config.yaml`](../config/litellm_config.yaml).
+
+One consequence: every stateless call now leaves behind an empty
+`./workspaces/auto-<uuid>/` directory (claudebox creates it on first use).
+These are harmless but will accumulate under sustained traffic; prune them
+periodically, e.g. `find workspaces -maxdepth 1 -name 'auto-*' -mtime +1 -exec rm -rf {} +`.
 
 ### Git access for agentic sessions
 
@@ -160,6 +186,12 @@ few people being busy at once, not the whole roster simultaneously.
 
 ## Troubleshooting
 
+- **`409 workspace busy, retry later`** under concurrent load: fixed by the
+  auto-workspace pre-call hook for stateless traffic - see
+  [Concurrency: why omitting the header is now safe](#concurrency-why-omitting-the-header-is-now-safe).
+  If you're still seeing it, you're likely sending an explicit
+  `X-Aicodebox-Workspace` value yourself and firing concurrent requests at
+  that same value - give each concurrent, unrelated task its own name.
 - **`claudebox` crash-loops with `ImportError: cannot import name
   'parse_native_event_lines'`**: a packaging bug in `psyb0t/claudebox:latest`
   and `:v2.4.2`. This repo pins `:v2.3.9`, which is confirmed working; don't

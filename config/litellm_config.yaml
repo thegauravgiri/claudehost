@@ -48,3 +48,4 @@ general_settings:
 
 litellm_settings:
   drop_params: false
+  callbacks: auto_workspace_callback.proxy_handler_instance
