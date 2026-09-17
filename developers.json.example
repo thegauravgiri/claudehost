@@ -1,0 +1,14 @@
+{
+  "developers": [
+    {
+      "slug": "alice",
+      "name": "Alice Smith",
+      "git_email": "alice@company.com"
+    },
+    {
+      "slug": "bob",
+      "name": "Bob Jones",
+      "git_email": "bob@company.com"
+    }
+  ]
+}

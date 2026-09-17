@@ -2,3 +2,4 @@
 ssh/
 workspaces/*
 !workspaces/.gitkeep
+developers.json

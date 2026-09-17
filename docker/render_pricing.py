@@ -1,17 +1,26 @@
-"""Fills in model_info pricing from litellm's own bundled cost map at build
-time, keyed by each model's `pricing_ref` - so nobody hand-types per-token
-prices, and a `docker compose up --build` picks up whatever prices ship with
-the pinned litellm image.
+"""Merges the base config with any generated per-developer model_list
+fragments (see generate_developers.py), then fills in model_info pricing
+from litellm's own bundled cost map, keyed by each model's `pricing_ref` -
+so nobody hand-types per-token prices, and a `docker compose up --build`
+picks up whatever prices ship with the pinned litellm image.
 """
+import os
 import sys
 
 import litellm
 import yaml
 
-config_path = sys.argv[1]
+base_path, *fragment_paths = sys.argv[1:]
 
-with open(config_path) as f:
+with open(base_path) as f:
     config = yaml.safe_load(f)
+
+for path in fragment_paths:
+    if not os.path.exists(path):
+        continue
+    with open(path) as f:
+        fragment = yaml.safe_load(f)
+    config["model_list"] += fragment.get("model_list", [])
 
 for entry in config["model_list"]:
     info = entry.setdefault("model_info", {})
@@ -24,5 +33,5 @@ for entry in config["model_list"]:
     info["input_cost_per_token"] = cost["input_cost_per_token"]
     info["output_cost_per_token"] = cost["output_cost_per_token"]
 
-with open(config_path, "w") as f:
+with open(base_path, "w") as f:
     yaml.safe_dump(config, f, sort_keys=False)

@@ -33,6 +33,7 @@ authenticated with your own Claude subscription or API key.
 - [Available models and effort levels](#available-models-and-effort-levels)
 - [Cost control: subscription vs. metered API](#cost-control-subscription-vs-metered-api)
 - [How workspace routing works](#how-workspace-routing-works)
+- [Per-developer instances](#per-developer-instances)
 - [Security notes](#security-notes)
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
@@ -117,6 +118,38 @@ client.chat.completions.create(
 This requires `forward_client_headers_to_llm_api: true` in
 [`config/litellm_config.yaml`](config/litellm_config.yaml) (already set):
 LiteLLM strips unrecognized headers by default.
+
+## Per-developer instances
+
+The default setup shares one `claudebox` (one subscription, one rate limit)
+across everyone. For a team of ~10-15, give each person their own instance
+instead, so their traffic runs against their own subscription:
+
+1. `cp developers.json.example developers.json` and list your team (name,
+   slug, git email). `developers.json` is gitignored, since it's your
+   team's real names/emails, not a secret but not template content either.
+2. Add one OAuth token per developer to `.env`:
+   `CLAUDE_CODE_OAUTH_TOKEN_<SLUG>=sk-ant-oat01-...` (from that person's own
+   `claude setup-token`).
+3. `python3 docker/generate_developers.py`. This (re)writes
+   `docker-compose.developers.yml` (one `claudebox-<slug>` service, own auth
+   volume, per developer) and `config/litellm_config.developers.yaml` (one
+   `<tier>-<slug>` model per Claude tier per developer), from
+   `docker/generate_developers.py`'s templates, not hand-edited.
+4. `docker compose -f docker-compose.yml -f docker-compose.developers.yml up -d --build`.
+5. Scope each developer's virtual key to only their own models
+   (`"models": ["sonnet-alice", "haiku-alice", ...]`), so nobody can spend
+   against someone else's subscription.
+
+Both generated files will contain your team's real names/emails once
+populated; if you don't want that in this repo's git history, gitignore
+them yourself before running the generator for real. The default
+(unpopulated) versions are committed as empty placeholders so a fresh clone
+still builds without running the generator first.
+
+`mem_limit`/`cpus` per developer default lower (2g/1 CPU) than the shared
+instance, since these are limits, not reservations. Size your host for a
+few people being busy at once, not the whole roster simultaneously.
 
 ## Security notes
 
