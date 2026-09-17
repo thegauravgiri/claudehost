@@ -1,14 +1,11 @@
-"""Auto-assigns a random claudebox workspace per request, so stateless
-callers (using this like a plain Anthropic API) never collide on the
-shared default workspace and hit "409 workspace busy" under concurrency -
-see docs/ADVANCED.md#troubleshooting. Callers that already set
-X-Aicodebox-Workspace themselves (real agentic/project sessions) are left
-untouched, and only ever touched here for detection, never deletion.
+"""Assigns a random claudebox workspace to any request that doesn't set
+one, so stateless callers don't collide on the shared default workspace
+and hit "409 workspace busy" under concurrent load. Requests that set
+X-Aicodebox-Workspace themselves are left untouched.
 
-Auto-assigned workspaces are single-use, so they're deleted again right
-after the call finishes (success or failure) - this container shares the
-same ./workspaces host mount as claudebox (see docker-compose.yml) so the
-directory it created is visible here too.
+Auto-assigned workspaces are single-use and deleted right after the call
+finishes; this container shares the ./workspaces mount with claudebox so
+the directory it created is visible here too.
 """
 import shutil
 import uuid
@@ -24,7 +21,6 @@ WORKSPACES_ROOT = Path("/workspaces")
 
 
 def _cleanup(data: dict) -> None:
-    # Best-effort: a failure here should never surface as a request error.
     try:
         workspace = (data.get("extra_headers") or {}).get(WORKSPACE_HEADER, "")
         if workspace.startswith(AUTO_PREFIX):
@@ -46,10 +42,8 @@ class AutoWorkspaceHandler(CustomLogger):
             "image_generation", "moderation", "audio_transcription",
         ],
     ):
-        # The client's own raw header (if any) shows up in data["headers"] at
-        # this point - NOT data["extra_headers"], which is a separate outbound
-        # mechanism. Check the former, write through the latter (confirmed by
-        # testing to actually reach claudebox as a real HTTP header).
+        # The client's raw header lands in data["headers"], not
+        # data["extra_headers"] (a separate outbound-only mechanism).
         client_headers = data.get("headers") or {}
         if not any(k.lower() == WORKSPACE_HEADER.lower() for k in client_headers):
             extra = data.get("extra_headers") or {}

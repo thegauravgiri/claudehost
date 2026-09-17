@@ -1,17 +1,5 @@
-# Routes to claudebox's OpenAI-compatible adapter (real Claude Code sessions).
-# Workspace selection: header `X-Aicodebox-Workspace: <name>` (v2.3.9 ignores
-# the `workspace` body field), via extra_headers on the client.
-#
-# `pricing_ref` names the real Anthropic model each entry should be priced
-# like for spend/budget visibility - resolved to actual per-token rates at
-# image build time (see docker/render_pricing.py) from litellm's own bundled
-# cost map, not hand-typed. The subscription itself is flat-rate; nothing
-# here is actually billed per token.
-#
-# claude/claudebox's CLAUDE_MODELS: haiku, sonnet, opus, opusplan (opusplan
-# is a hybrid Opus-plans/Sonnet-executes mode with no fixed per-token price;
-# priced here as opus, its more expensive component, as a conservative
-# upper-bound estimate).
+# Workspace selection: X-Aicodebox-Workspace header, not the `workspace`
+# body field (unsupported in the pinned claudebox version).
 model_list:
   - model_name: claude-haiku
     litellm_params:
@@ -44,7 +32,7 @@ model_list:
 
 general_settings:
   store_model_in_db: true
-  forward_client_headers_to_llm_api: true # needed for X-Aicodebox-Workspace
+  forward_client_headers_to_llm_api: true
 
 litellm_settings:
   drop_params: false

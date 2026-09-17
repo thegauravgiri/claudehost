@@ -1,4 +1,4 @@
-# claudebox has full bash/file access via Claude Code - never publish its port.
+# claudebox has full shell access via Claude Code - its port is never published.
 services:
   db:
     image: postgres:16
@@ -19,8 +19,7 @@ services:
 
   litellm:
     build:
-      context: .
-      dockerfile: docker/litellm.Dockerfile
+      context: ./litellm
     restart: unless-stopped
     ports:
       - "4000:4000"
@@ -31,8 +30,8 @@ services:
       STORE_MODEL_IN_DB: "True"
       CLAUDEBOX_API_MODE_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
     volumes:
-      # shared with claudebox, so the auto-workspace cleanup hook can rmtree
-      # the auto-<uuid> directories it creates (see docker/auto_workspace_callback.py)
+      # shared with claudebox so the auto-workspace cleanup hook can delete
+      # the directories it creates (see litellm/auto_workspace_callback.py)
       - ./workspaces:/workspaces
     depends_on:
       db:
@@ -43,7 +42,7 @@ services:
       - backend
 
   claudebox:
-    # latest/v2.4.2 crash-loop (packaging bug, ImportError on startup). v2.3.9 works.
+    # latest/v2.4.2 crash-loop on startup (packaging bug). v2.3.9 is confirmed working.
     image: psyb0t/claudebox:v2.3.9
     restart: unless-stopped
     environment:
@@ -56,7 +55,7 @@ services:
       - claude_auth:/home/aicode/.claude
       - ./ssh:/home/aicode/.ssh/claudebox:ro
       - ./workspaces:/workspace
-    # cap_drop: ALL breaks the entrypoint (needs CAP_DAC_OVERRIDE for /home/aicode setup)
+    # cap_drop: ALL breaks this image's entrypoint (needs CAP_DAC_OVERRIDE)
     security_opt:
       - no-new-privileges:true
     mem_limit: 4g

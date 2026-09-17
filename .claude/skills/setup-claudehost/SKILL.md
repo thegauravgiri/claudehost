@@ -146,6 +146,3 @@ Tell the user, concretely:
   `claude-haiku`/`claude-sonnet`/`claude-opus`/`claude-opusplan` - real
   developer keys should probably be scoped more narrowly per person/team
   (see README.md's "Setup" step 5).
-- If more than one person will use this: point them at README.md's
-  "Per-developer instances" section rather than having everyone share the
-  one subscription/token just configured.
