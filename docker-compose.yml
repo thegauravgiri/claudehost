@@ -30,6 +30,10 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@db:5432/litellm
       STORE_MODEL_IN_DB: "True"
       CLAUDEBOX_API_MODE_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
+    volumes:
+      # shared with claudebox, so the auto-workspace cleanup hook can rmtree
+      # the auto-<uuid> directories it creates (see docker/auto_workspace_callback.py)
+      - ./workspaces:/workspaces
     depends_on:
       db:
         condition: service_healthy

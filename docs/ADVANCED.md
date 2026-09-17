@@ -103,10 +103,14 @@ only acts when the header is absent. It's registered via
 `litellm_settings.callbacks` in
 [`config/litellm_config.yaml`](../config/litellm_config.yaml).
 
-One consequence: every stateless call now leaves behind an empty
-`./workspaces/auto-<uuid>/` directory (claudebox creates it on first use).
-These are harmless but will accumulate under sustained traffic; prune them
-periodically, e.g. `find workspaces -maxdepth 1 -name 'auto-*' -mtime +1 -exec rm -rf {} +`.
+The same hook also cleans up after itself: it deletes the `auto-<uuid>`
+workspace directory right after each call finishes (success or failure),
+so nothing accumulates on disk. This needs `litellm` to share the
+`./workspaces` mount with `claudebox` (see `docker-compose.yml`) - if you
+ever see `auto-*` directories piling up, check that mount is still in
+place before assuming a bug in the hook itself. Cleanup only ever touches
+directories it created (the `auto-` prefix); anything you named yourself
+is never removed.
 
 ### Git access for agentic sessions
 
