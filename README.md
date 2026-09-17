@@ -19,7 +19,7 @@ Two pieces do the work:
 - **Chat completions**: plain prompt in, text out, same as calling the Anthropic API directly.
 - **Agentic coding**: point a request at a real repo and Claude Code edits files, runs tests, and executes bash for real, not just in a text description.
 - **Flat-rate cost control**: one subscription's fixed price for the whole team instead of a bill that scales with every token every developer sends.
-- **Automatic concurrency handling**: stateless requests are isolated from each other automatically, so parallel traffic doesn't collide (details below).
+- **Automatic concurrency handling**: stateless requests are isolated from each other automatically, so parallel traffic doesn't collide.
 - **Self-updating cost tracking**: per-token pricing shown in LiteLLM's dashboard is pulled from LiteLLM's own bundled price list at build time, not hand-typed.
 
 ## Architecture
@@ -80,12 +80,6 @@ client.chat.completions.create(
 
 Same endpoint, same model: the header is what turns a chatbot into an agent working on your actual code.
 
-## Concurrency: why you don't need to think about workspaces for stateless calls
-
-claudebox allows exactly one active Claude Code process per workspace, and rejects (rather than queues) a concurrent request to the same one with `409 workspace busy`. Every request that skipped the workspace header used to land on the same default workspace, so parallel stateless traffic (a chatbot, a code-review bot firing off concurrent calls) would collide under load.
-
-LiteLLM is configured with a pre-call hook (`litellm/auto_workspace_callback.py`) that assigns a random, disposable workspace to any request that doesn't set one, and deletes it again once the call finishes. Stateless callers get automatic isolation for free; nothing changes for requests that set `X-Aicodebox-Workspace` themselves.
-
 ## Cost control
 
 An Anthropic API key bills per token: the cost scales with every request from every developer, and a busy week can spike unpredictably. A subscription is a flat monthly price for the whole team instead.
@@ -118,14 +112,6 @@ ssh-keygen -t ed25519 -f ssh/claudebox -N ""
 ```
 
 Add `ssh/claudebox.pub` as a deploy key on your git host. `ssh/` is mounted read-only into `claudebox`.
-
-## Troubleshooting
-
-- **`409 workspace busy, retry later`** under concurrent load: only happens if you're setting `X-Aicodebox-Workspace` yourself and firing concurrent requests at the same value. Give each concurrent, unrelated task its own name. Stateless calls that omit the header are unaffected (see [Concurrency](#concurrency-why-you-dont-need-to-think-about-workspaces-for-stateless-calls)).
-- **`claudebox` crash-loops with `ImportError: cannot import name 'parse_native_event_lines'`**: a packaging bug in `psyb0t/claudebox:latest` and `:v2.4.2`. This repo pins `:v2.3.9`, confirmed working. Don't bump the tag without testing first.
-- **`workspace` isn't reaching claudebox**: the pinned version only reads workspace selection from the `X-Aicodebox-Workspace` header, not a `workspace` body field. Use `extra_headers`, not `extra_body`.
-- **claudebox fails to start with `mkdir: cannot create directory '/home/aicode': Permission denied`**: don't run it with `read_only: true` or `cap_drop: ALL`. Its entrypoint needs to write to `/home/aicode` as root before dropping privileges.
-- **`reasoning_effort` in a request has no effect**: the pinned claudebox adapter accepts the field but doesn't wire it to Claude Code's `--effort` flag. Pass it directly instead: `extra_headers={"X-Aicodebox-Extra-Args": '["--effort", "high"]'}` (levels: `low`, `medium`, `high`, `xhigh`, `max`).
 
 ## License
 
