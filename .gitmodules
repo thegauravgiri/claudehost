@@ -1,0 +1,4 @@
+[submodule "claudebox"]
+	path = claudebox
+	url = https://github.com/psyb0t/docker-claudebox.git
+	branch = master

@@ -33,6 +33,8 @@ Only `litellm`'s port is published. `claudebox` gets real shell access via Claud
 
 ## Quick start
 
+`claudebox`'s source is vendored as a git submodule; `git clone --recurse-submodules` pulls it in, or run `git submodule update --init` afterward if you already cloned without it. It's there for reference only, not needed to run the stack (`docker compose` pulls the built image from Docker Hub).
+
 ```bash
 cp .env.example .env
 ```
@@ -94,7 +96,7 @@ The tradeoff is capacity, not cost: a subscription has its own rate limits share
 
 ## Security
 
-- **Read [claudebox's source](https://github.com/psyb0t/docker-claudebox) before trusting it with your subscription token.** It runs Claude Code with `--permission-mode bypassPermissions` and passwordless sudo, so any request that reaches it can run arbitrary commands in whatever workspace it's pointed at. It's a small, single-maintainer project without an independent security audit; the source is clean (no telemetry, no obfuscation), but treat it like any small dependency, not a heavily-reviewed one.
+- **Read claudebox's source before trusting it with your subscription token.** It's vendored as a git submodule at [`claudebox/`](claudebox) (upstream: [psyb0t/docker-claudebox](https://github.com/psyb0t/docker-claudebox)), so it's already in this repo, no separate clone needed. It runs Claude Code with `--permission-mode bypassPermissions` and passwordless sudo, so any request that reaches it can run arbitrary commands in whatever workspace it's pointed at. It's a small, single-maintainer project without an independent security audit; the source is clean (no telemetry, no obfuscation), but treat it like any small dependency, not a heavily-reviewed one.
 - Put `litellm`'s published port behind TLS and restrict it to your VPN or office IP range before calling this production. The compose file itself does no network restriction beyond keeping `claudebox` off the public port.
 
 ## Configuration reference
