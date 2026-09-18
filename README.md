@@ -111,7 +111,7 @@ mkdir -p ssh
 ssh-keygen -t ed25519 -f ssh/claudebox -N ""
 ```
 
-Add `ssh/claudebox.pub` as a deploy key on your git host. `ssh/` is mounted read-only into `claudebox`.
+Add `ssh/claudebox.pub` as a deploy key on your git host. `ssh/` mounts as a directory, so the private key lands at `/home/aicode/.ssh/claudebox/claudebox` inside the container, not somewhere SSH checks by default; `GIT_SSH_COMMAND` in `docker-compose.yml` already points at that exact path.
 
 ## License
 

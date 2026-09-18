@@ -51,6 +51,9 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
       CLAUDEBOX_GIT_NAME: ${CLAUDEBOX_GIT_NAME}
       CLAUDEBOX_GIT_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
+      # ./ssh mounts as a directory, so the key generated at ssh/claudebox
+      # lands at this nested path, not somewhere ssh checks by default.
+      GIT_SSH_COMMAND: ssh -i /home/aicode/.ssh/claudebox/claudebox -o UserKnownHostsFile=/home/aicode/.ssh/known_hosts -o IdentitiesOnly=yes
     volumes:
       - claude_auth:/home/aicode/.claude
       - ./ssh:/home/aicode/.ssh/claudebox:ro
