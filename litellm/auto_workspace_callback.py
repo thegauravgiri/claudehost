@@ -20,12 +20,21 @@ guard as above), disabling Claude Code's internal Bash/Read/Write/Edit
 tools. A workspace-less call has no real repo to act on, so those tools
 can't do anything useful anyway - the directory is deleted right after
 the call, before a caller could ever retrieve anything written to it.
-Verified this drops total tokens for a plain chat call from ~24-33k to
-~727, and does not affect caller-supplied OpenAI-style `tools`/
-`tool_choice` (a separate mechanism from claudebox's internal tools;
-claudebox already disables internal tools by default whenever the
-caller sends its own `tools`, so this only changes plain, non-tool-call
-requests).
+Does not affect caller-supplied OpenAI-style `tools`/`tool_choice` (a
+separate mechanism from claudebox's internal tools; claudebox already
+disables internal tools by default whenever the caller sends its own
+`tools`).
+
+Workspace-less requests that don't supply their own `system` message
+also get a minimal one prepended, so Claude Code's default system
+prompt (its own agent framing - tool-use instructions, coding
+conventions - meant for when it's driving its own tools) never gets
+used outside the workspace path. An empty string wouldn't work here;
+claudebox only overrides the default when system_prompt is truthy, so
+the placeholder has to be real, non-empty text. Together with no-tools,
+this cuts total tokens for a plain call with no system prompt of its
+own from ~24-33k down to ~650-700 (verified); a caller supplying its
+own system message is left untouched either way.
 """
 import json
 import shutil
@@ -42,6 +51,7 @@ NO_TOOLS_HEADER = "X-Aicodebox-No-Tools"
 CACHE_FLAG = "--exclude-dynamic-system-prompt-sections"
 AUTO_PREFIX = "auto-"
 WORKSPACES_ROOT = Path("/workspaces")
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def _cleanup(data: dict) -> None:
@@ -85,6 +95,16 @@ class AutoWorkspaceHandler(CustomLogger):
             if not has_no_tools:
                 extra[NO_TOOLS_HEADER] = "true"
             data["extra_headers"] = extra
+
+            messages = data.get("messages") or []
+            has_system = any(
+                isinstance(m, dict) and m.get("role") == "system" for m in messages
+            )
+            if not has_system:
+                data["messages"] = [
+                    {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                    *messages,
+                ]
         return data
 
     async def async_post_call_success_hook(self, data, user_api_key_dict, response):
