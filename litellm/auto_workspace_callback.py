@@ -1,40 +1,41 @@
-"""Assigns a random claudebox workspace to any request that doesn't set
-one, so stateless callers don't collide on the shared default workspace
-and hit "409 workspace busy" under concurrent load. Requests that set
-X-Aicodebox-Workspace themselves are left untouched.
+"""This callback is registered globally in litellm_settings.callbacks, so it
+fires for every model on this gateway - including ones that have nothing to
+do with claudebox (e.g. a directly-configured Azure/OpenAI model). Every
+change below only ever applies to the claudebox-backed model names in
+CLAUDEBOX_MODELS; anything else returns untouched on the first line.
 
-Auto-assigned workspaces are single-use and deleted right after the call
-finishes; this container shares the ./workspaces mount with claudebox so
-the directory it created is visible here too.
+For claudebox models:
 
-Auto-assigned requests also get --exclude-dynamic-system-prompt-sections,
-unless the client already sent its own X-Aicodebox-Extra-Args (adding a
-second one would collide with LiteLLM's own header forwarding). Claude
-Code's system prompt embeds the cwd, and a fresh random workspace on
-every call means that block never hits Anthropic's prompt cache; this
-flag moves it out of the cached prefix, verified to cut per-call cache
-misses from ~8.6k tokens down to ~3.5k.
+Assigns a random workspace to any request that doesn't set one, so
+stateless callers don't collide on the shared default workspace and hit
+"409 workspace busy" under concurrent load. Requests that set
+X-Aicodebox-Workspace themselves are left untouched. Auto-assigned
+workspaces are single-use and deleted right after the call finishes; this
+container shares the ./workspaces mount with claudebox so the directory it
+created is visible here too.
 
-Auto-assigned requests also get X-Aicodebox-No-Tools (same client-header
-guard as above), disabling Claude Code's internal Bash/Read/Write/Edit
-tools. A workspace-less call has no real repo to act on, so those tools
-can't do anything useful anyway - the directory is deleted right after
-the call, before a caller could ever retrieve anything written to it.
-Does not affect caller-supplied OpenAI-style `tools`/`tool_choice` (a
-separate mechanism from claudebox's internal tools; claudebox already
-disables internal tools by default whenever the caller sends its own
-`tools`).
+Auto-assigned requests also get --exclude-dynamic-system-prompt-sections
+and X-Aicodebox-No-Tools, and get a minimal placeholder system message
+prepended if they didn't supply their own. Together this cuts total
+tokens for a plain call with no system prompt of its own from ~24-33k
+down to ~650-700 (verified) by never letting Claude Code's own agent
+framing - system prompt or internal tools - leak into a workspace-less
+call that has nothing for that framing to act on anyway. A caller that
+supplies its own system message, or sets a workspace, is left untouched
+on each of these respectively.
 
-Workspace-less requests that don't supply their own `system` message
-also get a minimal one prepended, so Claude Code's default system
-prompt (its own agent framing - tool-use instructions, coding
-conventions - meant for when it's driving its own tools) never gets
-used outside the workspace path. An empty string wouldn't work here;
-claudebox only overrides the default when system_prompt is truthy, so
-the placeholder has to be real, non-empty text. Together with no-tools,
-this cuts total tokens for a plain call with no system prompt of its
-own from ~24-33k down to ~650-700 (verified); a caller supplying its
-own system message is left untouched either way.
+Also translates the standard OpenAI `reasoning`/`reasoning_effort`
+parameters into claudebox's `--effort` CLI flag via
+X-Aicodebox-Extra-Args, for both workspace and workspace-less calls -
+claudebox accepts but never wires those OpenAI-standard fields to
+anything, so without this translation they're silently inert.
+
+All of the X-Aicodebox-Extra-Args injections above (cache flag, effort)
+are skipped whenever the client already sent its own Extra-Args header:
+forward_client_headers_to_llm_api forwards the client's raw header
+regardless of what this hook sets in data["extra_headers"], so setting
+both results in claudebox receiving an invalid, comma-joined value. Same
+guard applies to X-Aicodebox-Workspace and X-Aicodebox-No-Tools.
 """
 import json
 import shutil
@@ -45,6 +46,8 @@ from typing import Literal
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.proxy.proxy_server import DualCache, UserAPIKeyAuth
 
+CLAUDEBOX_MODELS = {"claude-haiku", "claude-sonnet", "claude-opus", "claude-opusplan"}
+
 WORKSPACE_HEADER = "X-Aicodebox-Workspace"
 EXTRA_ARGS_HEADER = "X-Aicodebox-Extra-Args"
 NO_TOOLS_HEADER = "X-Aicodebox-No-Tools"
@@ -52,6 +55,19 @@ CACHE_FLAG = "--exclude-dynamic-system-prompt-sections"
 AUTO_PREFIX = "auto-"
 WORKSPACES_ROOT = Path("/workspaces")
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
+
+
+def _extract_effort(data: dict) -> str | None:
+    nested = data.get("reasoning")
+    if isinstance(nested, dict):
+        effort = nested.get("effort")
+        if isinstance(effort, str) and effort.lower() in VALID_EFFORT_LEVELS:
+            return effort.lower()
+    flat = data.get("reasoning_effort")
+    if isinstance(flat, str) and flat.lower() in VALID_EFFORT_LEVELS:
+        return flat.lower()
+    return None
 
 
 def _cleanup(data: dict) -> None:
@@ -76,25 +92,29 @@ class AutoWorkspaceHandler(CustomLogger):
             "image_generation", "moderation", "audio_transcription",
         ],
     ):
+        if data.get("model") not in CLAUDEBOX_MODELS:
+            return data
+
         # The client's raw header lands in data["headers"], not
-        # data["extra_headers"] (a separate outbound-only mechanism) - and
-        # forward_client_headers_to_llm_api forwards that raw header
-        # regardless of what we set here, so we can only add a header
-        # cleanly when the client didn't also send one themselves (else
-        # both get sent and claudebox receives a comma-joined, invalid value).
+        # data["extra_headers"] (a separate outbound-only mechanism).
         client_headers = data.get("headers") or {}
         has_workspace = any(k.lower() == WORKSPACE_HEADER.lower() for k in client_headers)
         has_extra_args = any(k.lower() == EXTRA_ARGS_HEADER.lower() for k in client_headers)
         has_no_tools = any(k.lower() == NO_TOOLS_HEADER.lower() for k in client_headers)
 
+        extra_args_to_add = []
         if not has_workspace:
-            extra = data.get("extra_headers") or {}
+            extra_args_to_add.append(CACHE_FLAG)
+        effort = _extract_effort(data)
+        if effort:
+            extra_args_to_add += ["--effort", effort]
+
+        extra = data.get("extra_headers") or {}
+
+        if not has_workspace:
             extra[WORKSPACE_HEADER] = f"{AUTO_PREFIX}{uuid.uuid4()}"
-            if not has_extra_args:
-                extra[EXTRA_ARGS_HEADER] = json.dumps([CACHE_FLAG])
             if not has_no_tools:
                 extra[NO_TOOLS_HEADER] = "true"
-            data["extra_headers"] = extra
 
             messages = data.get("messages") or []
             has_system = any(
@@ -105,6 +125,12 @@ class AutoWorkspaceHandler(CustomLogger):
                     {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
                     *messages,
                 ]
+
+        if extra_args_to_add and not has_extra_args:
+            extra[EXTRA_ARGS_HEADER] = json.dumps(extra_args_to_add)
+
+        if extra:
+            data["extra_headers"] = extra
         return data
 
     async def async_post_call_success_hook(self, data, user_api_key_dict, response):
