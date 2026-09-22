@@ -35,5 +35,5 @@ general_settings:
   forward_client_headers_to_llm_api: true
 
 litellm_settings:
-  drop_params: false
+  drop_params: true
   callbacks: auto_workspace_callback.proxy_handler_instance
