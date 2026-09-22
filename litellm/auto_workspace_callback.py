@@ -14,15 +14,24 @@ workspaces are single-use and deleted right after the call finishes; this
 container shares the ./workspaces mount with claudebox so the directory it
 created is visible here too.
 
-Auto-assigned requests also get --exclude-dynamic-system-prompt-sections
-and X-Aicodebox-No-Tools, and get a minimal placeholder system message
-prepended if they didn't supply their own. Together this cuts total
-tokens for a plain call with no system prompt of its own from ~24-33k
-down to ~650-700 (verified) by never letting Claude Code's own agent
-framing - system prompt or internal tools - leak into a workspace-less
-call that has nothing for that framing to act on anyway. A caller that
-supplies its own system message, or sets a workspace, is left untouched
-on each of these respectively.
+Auto-assigned requests also get X-Aicodebox-No-Tools and a minimal
+placeholder system message if they didn't supply their own, plus
+--safe-mode (disables CLAUDE.md/skills/plugins/hooks auto-loading).
+Together this cuts total tokens for a plain call with no system prompt
+of its own from ~24-33k down to ~150-160 (verified) by never letting
+Claude Code's own agent framing - system prompt, internal tools, or
+project-memory discovery - leak into a workspace-less call that has
+nothing for any of that to act on anyway. A caller that supplies its
+own system message, or sets a workspace, is left untouched on each of
+these respectively. (--bare would disable CLAUDE.md discovery too, but
+also forces API-key-only auth and drops OAuth/subscription auth
+entirely - not usable here.)
+
+--exclude-dynamic-system-prompt-sections was tried first here and is
+NOT used: its own help text says it's ignored whenever --system-prompt
+is set, and a system message (the caller's or our injected default) is
+now always present for a workspace-less call, so it would always be a
+no-op in this configuration.
 
 Also translates the standard OpenAI `reasoning`/`reasoning_effort`
 parameters into claudebox's `--effort` CLI flag via
@@ -30,7 +39,7 @@ X-Aicodebox-Extra-Args, for both workspace and workspace-less calls -
 claudebox accepts but never wires those OpenAI-standard fields to
 anything, so without this translation they're silently inert.
 
-All of the X-Aicodebox-Extra-Args injections above (cache flag, effort)
+All of the X-Aicodebox-Extra-Args injections above (safe-mode, effort)
 are skipped whenever the client already sent its own Extra-Args header:
 forward_client_headers_to_llm_api forwards the client's raw header
 regardless of what this hook sets in data["extra_headers"], so setting
@@ -51,7 +60,7 @@ CLAUDEBOX_MODELS = {"claude-haiku", "claude-sonnet", "claude-opus", "claude-opus
 WORKSPACE_HEADER = "X-Aicodebox-Workspace"
 EXTRA_ARGS_HEADER = "X-Aicodebox-Extra-Args"
 NO_TOOLS_HEADER = "X-Aicodebox-No-Tools"
-CACHE_FLAG = "--exclude-dynamic-system-prompt-sections"
+SAFE_MODE_FLAG = "--safe-mode"
 AUTO_PREFIX = "auto-"
 WORKSPACES_ROOT = Path("/workspaces")
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
@@ -104,7 +113,7 @@ class AutoWorkspaceHandler(CustomLogger):
 
         extra_args_to_add = []
         if not has_workspace:
-            extra_args_to_add.append(CACHE_FLAG)
+            extra_args_to_add.append(SAFE_MODE_FLAG)
         effort = _extract_effort(data)
         if effort:
             extra_args_to_add += ["--effort", effort]
