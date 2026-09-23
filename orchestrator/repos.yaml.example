@@ -1,0 +1,13 @@
+# Copy to repos.yaml and fill in your repos. Each top-level key is both the
+# Jira project key (used to route an /agent comment to a repo) and the slug
+# used for this repo's bare clone directory and lock file - keeping these
+# identical avoids a separate mapping table for something that's a 1:1
+# relationship in practice.
+#
+# remote must be an https://github.com/... URL, not an SSH one: auth is
+# applied via GH_TOKEN through GIT_CONFIG_* url.insteadOf rewriting (see
+# docker-compose.yml), which only rewrites https:// URLs.
+
+PROJ:
+  remote: https://github.com/your-org/your-repo.git
+  default_branch: main

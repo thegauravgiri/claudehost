@@ -42,8 +42,12 @@ services:
       - backend
 
   claudebox:
-    # latest/v2.4.2 crash-loop on startup (packaging bug). v2.3.9 is confirmed working.
-    image: psyb0t/claudebox:v2.3.9
+    # v2.3.9-full: same claudebox version as the working v2.3.9 minimal image,
+    # but pre-loaded with gh/Go/Python/Node/C++/DB-client toolchains. Required
+    # (not just an optimization) for the Jira agent flow: no-new-privileges
+    # below blocks passwordless sudo, so the minimal image's "Claude installs
+    # what it needs on the fly" escape hatch doesn't work here.
+    image: psyb0t/claudebox:v2.3.9-full
     restart: unless-stopped
     environment:
       CLAUDEBOX_API_MODE: "1"
@@ -51,19 +55,86 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
       CLAUDEBOX_GIT_NAME: ${CLAUDEBOX_GIT_NAME}
       CLAUDEBOX_GIT_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
+      # v2.3.9 doesn't wire CLAUDEBOX_GIT_NAME/EMAIL into git itself (no
+      # gitconfig is ever written) - git reads these directly instead, so
+      # they're the actual source of commit identity for agent commits.
+      GIT_AUTHOR_NAME: ${CLAUDEBOX_GIT_NAME}
+      GIT_AUTHOR_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
+      GIT_COMMITTER_NAME: ${CLAUDEBOX_GIT_NAME}
+      GIT_COMMITTER_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
       # ./ssh mounts as a directory, so the key generated at ssh/claudebox
       # lands at this nested path, not somewhere ssh checks by default.
       GIT_SSH_COMMAND: ssh -i /home/aicode/.ssh/claudebox/claudebox -o UserKnownHostsFile=/home/aicode/.ssh/known_hosts -o IdentitiesOnly=yes
+      # gh CLI and PR creation for the Jira agent flow. A single fine-grained
+      # PAT on a machine user, not the SSH deploy key: a deploy key can only
+      # attach to one repo, so it can't serve a multi-repo repos.yaml.
+      GH_TOKEN: ${GH_TOKEN}
+      # No GH_REPO here: it'd need to vary per-request (each issue targets a
+      # different repo) and there's no per-request env-var mechanism, only
+      # CLI extra-args. The agent prompt passes --repo explicitly on every gh
+      # command instead (see orchestrator/core.py's PROMPT_TEMPLATE).
+      # Rewrites https://github.com/... git operations to authenticate with
+      # GH_TOKEN, without ever writing the token into a repo's remote URL
+      # (which would persist on disk and leak via `git remote -v`).
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf
+      GIT_CONFIG_VALUE_0: https://github.com/
     volumes:
       - claude_auth:/home/aicode/.claude
       - ./ssh:/home/aicode/.ssh/claudebox:ro
       - ./workspaces:/workspace
+      # Shared bare-repo store for the Jira agent's git worktrees (see
+      # orchestrator/git_ops.py). Read-write: agent commits/pushes write
+      # directly into these bare repos through the worktree's commondir.
+      - ./repos:/repos
     # cap_drop: ALL breaks this image's entrypoint (needs CAP_DAC_OVERRIDE)
     security_opt:
       - no-new-privileges:true
-    mem_limit: 4g
-    cpus: 2
+    # Raised from 4g/2 for the Jira agent flow: cpus is a CFS quota, not a
+    # cpuset, so nproc still reports the host's core count regardless -
+    # autodetecting build tools (jest, make -j, cargo) size their worker
+    # count off nproc and will oversubscribe a low cpus limit, times however
+    # many issues run concurrently. Tune to actual host capacity.
+    mem_limit: 8g
+    cpus: 4
     pids_limit: 512
+    networks:
+      - backend
+
+  orchestrator:
+    build:
+      context: ./orchestrator
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ${ORCHESTRATOR_LITELLM_KEY}
+      JIRA_BASE_URL: ${JIRA_BASE_URL}
+      JIRA_EMAIL: ${JIRA_EMAIL}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+      JIRA_WEBHOOK_SECRET: ${JIRA_WEBHOOK_SECRET}
+      GH_TOKEN: ${GH_TOKEN}
+      GH_WEBHOOK_SECRET: ${GH_WEBHOOK_SECRET}
+      # Same insteadOf rewrite as claudebox, so the orchestrator's own git
+      # operations (clone/fetch/worktree add) authenticate identically.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf
+      GIT_CONFIG_VALUE_0: https://github.com/
+    volumes:
+      # Same absolute paths as claudebox: git worktree bakes absolute paths
+      # into its metadata, so the directory a worktree is created under here
+      # must resolve to the same path claudebox sees it at.
+      - ./workspaces:/workspace
+      - ./repos:/repos
+      - orchestrator_state:/state
+    # Matches the aicode user's uid/gid in claudebox. Anything this service
+    # creates under /workspace or /repos must be writable by that uid, not
+    # just root - see orchestrator/README for why this isn't optional.
+    user: "1000:1000"
+    depends_on:
+      litellm:
+        condition: service_started
     networks:
       - backend
 
@@ -73,3 +144,4 @@ networks:
 volumes:
   postgres_data:
   claude_auth:
+  orchestrator_state:

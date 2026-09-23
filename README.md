@@ -102,7 +102,12 @@ The tradeoff is capacity, not cost: a subscription has its own rate limits share
 | `POSTGRES_PASSWORD` | `db`, `litellm` | Postgres auth for the virtual-key/spend-tracking database |
 | `CLAUDEBOX_API_MODE_TOKEN` | `litellm`, `claudebox` | Shared bearer secret between the gateway and the Claude Code backend |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claudebox` | Claude subscription auth, from `claude setup-token` |
-| `CLAUDEBOX_GIT_NAME` / `CLAUDEBOX_GIT_EMAIL` | `claudebox` | Git identity for commits made inside agentic sessions |
+| `CLAUDEBOX_GIT_NAME` / `CLAUDEBOX_GIT_EMAIL` | `claudebox` | Git identity for commits made inside agentic sessions (fed to git via `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars - the pinned claudebox version doesn't wire these into a gitconfig itself) |
+| `ORCHESTRATOR_LITELLM_KEY` | `orchestrator` | Virtual key the orchestrator authenticates to `litellm` with |
+| `GH_TOKEN` | `claudebox`, `orchestrator` | Fine-grained GitHub PAT: git push/pull and `gh pr create` for the Jira agent flow |
+| `GH_WEBHOOK_SECRET` | `orchestrator` | Verifies inbound GitHub webhooks (PR merged/closed) |
+| `JIRA_BASE_URL` / `JIRA_EMAIL` / `JIRA_API_TOKEN` | `orchestrator` | Jira Cloud REST API auth for reading `/agent` comments and posting results |
+| `JIRA_WEBHOOK_SECRET` | `orchestrator` | Verifies inbound Jira webhooks |
 
 Git access for agentic sessions that need to `git clone`/push to a private repo:
 
@@ -112,6 +117,23 @@ ssh-keygen -t ed25519 -f ssh/claudebox -N ""
 ```
 
 Add `ssh/claudebox.pub` as a deploy key on your git host. `ssh/` mounts as a directory, so the private key lands at `/home/aicode/.ssh/claudebox/claudebox` inside the container, not somewhere SSH checks by default; `GIT_SSH_COMMAND` in `docker-compose.yml` already points at that exact path.
+
+A deploy key only ever attaches to one repository, so it's a fine default for a single-project agentic workspace but not for the Jira flow below, which needs one credential across many repos.
+
+## Jira-driven coding agent
+
+The `orchestrator` service turns Claude Code into a coding agent you talk to inside a Jira issue. Comment `/agent go` and it implements the issue in a real checkout, verifies its own work, opens a PR, and reports back - then comment `/agent also handle the edge case where X` and it picks up the same branch and PR rather than starting over. It's optional; the base stack works without it.
+
+How it stays possible for three issues on the same repo to run at once: each issue gets its own [git worktree](https://git-scm.com/docs/git-worktree) checked out from one shared bare clone per repo, so file writes never collide and git itself refuses to check out the same branch twice.
+
+Setup:
+
+1. Switch `claudebox`'s image to the `-full` variant (already done in `docker-compose.yml`) - the flow needs `gh` and language toolchains preinstalled, since `security_opt: no-new-privileges` blocks the minimal image's usual "install what you need via sudo" fallback.
+2. Fill in the Jira/GitHub block in `.env` (see `.env.example`) - a Jira Cloud API token, a fine-grained GitHub PAT scoped to `Contents` and `Pull requests` on the repos you want it to touch, and two webhook secrets (`generate_secrets.sh` can generate those two).
+3. List your repos in `orchestrator/repos.yaml`: Jira project key → GitHub remote + default branch.
+4. Point a Jira Automation rule (comment created/updated) at the orchestrator's webhook endpoint, and a GitHub webhook (pull request closed) at the same service, using the two secrets from step 2.
+
+`workspaces/CLAUDE.md` and `.init-done` live on claudebox's persistent volume and are only generated on first container create - if you're switching an existing deployment to the `-full` image, delete both so they regenerate with the full toolchain list; otherwise the agent is told it's on the minimal image and it isn't.
 
 ## License
 

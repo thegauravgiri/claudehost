@@ -2,3 +2,6 @@
 ssh/
 workspaces/*
 !workspaces/.gitkeep
+repos/*
+!repos/.gitkeep
+orchestrator/repos.yaml
