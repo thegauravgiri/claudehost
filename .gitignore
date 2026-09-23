@@ -5,3 +5,5 @@ workspaces/*
 repos/*
 !repos/.gitkeep
 orchestrator/repos.yaml
+__pycache__/
+*.pyc

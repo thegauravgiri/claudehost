@@ -4,12 +4,15 @@ is the one file that changes if the tracker is ever swapped for GitHub
 Issues - core.py knows nothing about Jira or ADF.
 """
 import hmac
+import logging
 import os
 import re
 
 import httpx
 
 from core import WorkItem
+
+log = logging.getLogger("orchestrator.sources.jira")
 
 TRIGGER_RE = re.compile(r"^/agent\s+(.+)", re.IGNORECASE | re.DOTALL)
 
@@ -40,34 +43,70 @@ def _extract_text(body) -> str:
 
     def walk(node) -> None:
         if isinstance(node, dict):
-            if node.get("type") == "text":
+            node_type = node.get("type")
+            if node_type == "text":
                 parts.append(node.get("text", ""))
+            elif node_type == "hardBreak":
+                parts.append("\n")
             for child in node.get("content") or []:
                 walk(child)
+            if node_type in ("paragraph", "heading"):
+                parts.append("\n\n")
         elif isinstance(node, list):
             for child in node:
                 walk(child)
 
     walk(body)
-    return "".join(parts)
+    return "".join(parts).strip()
 
 
-def parse_webhook(payload: dict) -> WorkItem | None:
+def _format_comments_history(comments_data: dict, current_comment_text: str = "") -> str:
+    comments = comments_data.get("comments") or []
+    if not comments:
+        return ""
+    formatted = []
+    for c in comments[-6:]:
+        author = (c.get("author") or {}).get("displayName") or "User"
+        body = _extract_text(c.get("body")).strip()
+        if body and body != current_comment_text:
+            formatted.append(f"- [{author}]: {body}")
+    if not formatted:
+        return ""
+    return "\nRecent ticket comments / discussion:\n" + "\n".join(formatted) + "\n"
+
+
+async def fetch_issue(issue_key: str) -> dict:
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}?fields=summary,description,comment"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, auth=(JIRA_EMAIL, JIRA_API_TOKEN))
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def parse_webhook(payload: dict) -> WorkItem | None:
     """None means: not a comment event, not an /agent command, or a comment
     posted by the bot's own account (without this guard, our own result
     comment would re-trigger the webhook and the agent would loop on itself).
     """
-    if payload.get("webhookEvent") not in ("comment_created", "comment_updated"):
+    log.info("Received Jira payload keys: %s", list(payload.keys()))
+    event = payload.get("webhookEvent")
+    log.info("Received Jira webhook event: %s", event)
+    if event not in ("comment_created", "comment_updated"):
+        log.info("Ignoring webhook: event %r is not comment_created or comment_updated", event)
         return None
 
     comment = payload.get("comment") or {}
     author = comment.get("author") or {}
-    if JIRA_EMAIL and author.get("emailAddress", "").lower() == JIRA_EMAIL.lower():
+    author_email = author.get("emailAddress", "")
+    if JIRA_EMAIL and author_email.lower() == JIRA_EMAIL.lower():
+        log.info("Ignoring webhook: author email %r matches JIRA_EMAIL %r", author_email, JIRA_EMAIL)
         return None
 
     text = _extract_text(comment.get("body")).strip()
+    log.info("Extracted comment body: %r", text)
     match = TRIGGER_RE.match(text)
     if not match:
+        log.info("Ignoring webhook: comment body does not match '^/agent <instruction>' pattern")
         return None
 
     issue = payload.get("issue") or {}
@@ -75,15 +114,44 @@ def parse_webhook(payload: dict) -> WorkItem | None:
     fields = issue.get("fields") or {}
     project_key = (fields.get("project") or {}).get("key")
     if not issue_key or not project_key:
+        log.warning("Ignoring webhook: missing issue_key (%r) or project_key (%r)", issue_key, project_key)
         return None
 
+    title = fields.get("summary") or ""
+    description = _extract_text(fields.get("description"))
+    comments_section = ""
+
+    # Fetch full issue details (description and recent comments) from Jira REST API
+    if JIRA_BASE_URL and JIRA_API_TOKEN:
+        try:
+            issue_data = await fetch_issue(issue_key)
+            fetched_fields = issue_data.get("fields") or {}
+            title = fetched_fields.get("summary") or title
+            if not description:
+                description = _extract_text(fetched_fields.get("description"))
+            comments_section = _format_comments_history(
+                fetched_fields.get("comment") or {}, current_comment_text=text,
+            )
+            log.info("Fetched issue details and comments from Jira for %s", issue_key)
+        except Exception:
+            log.exception("Failed to fetch full issue details from Jira REST API for %s", issue_key)
+
+    log.info(
+        "Parsed WorkItem for issue %s (project %s):\n  Title: %r\n  Description: %r\n  Instruction: %r",
+        issue_key,
+        project_key,
+        title,
+        description,
+        match.group(1).strip(),
+    )
     return WorkItem(
         source="jira",
         external_id=issue_key,
         repo_slug=project_key,
-        title=fields.get("summary") or "",
-        description=_extract_text(fields.get("description")),
+        title=title,
+        description=description,
         instruction=match.group(1).strip(),
+        comments_section=comments_section,
     )
 
 

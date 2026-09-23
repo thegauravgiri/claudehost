@@ -95,8 +95,8 @@ services:
     # autodetecting build tools (jest, make -j, cargo) size their worker
     # count off nproc and will oversubscribe a low cpus limit, times however
     # many issues run concurrently. Tune to actual host capacity.
-    mem_limit: 8g
-    cpus: 4
+    mem_limit: 7g
+    cpus: 2
     pids_limit: 512
     networks:
       - backend
@@ -106,6 +106,7 @@ services:
       context: ./orchestrator
     restart: unless-stopped
     ports:
+      - "80:8090"
       - "8090:8090"
     environment:
       LITELLM_BASE_URL: http://litellm:4000
@@ -127,6 +128,7 @@ services:
       # must resolve to the same path claudebox sees it at.
       - ./workspaces:/workspace
       - ./repos:/repos
+      - ./orchestrator:/app
       - orchestrator_state:/state
     # Matches the aicode user's uid/gid in claudebox. Anything this service
     # creates under /workspace or /repos must be writable by that uid, not

@@ -42,11 +42,14 @@ RESULT_SCHEMA = {
         "schema": {
             "type": "object",
             "properties": {
-                "status": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["done", "question", "failed", "blocked"],
+                },
                 "pr_url": {"type": "string"},
                 "summary": {"type": "string"},
             },
-            "required": ["status", "pr_url", "summary"],
+            "required": ["status", "summary"],
             "additionalProperties": False,
         },
     },
@@ -60,30 +63,31 @@ Task from {source} issue {issue_key}:
 {title}
 
 {description}
-
+{comments_section}
 Latest instruction:
 {instruction}
 
 Rules:
-- Before doing anything else, check `gh pr list --repo {repo_full_name} \
---head agent/{issue_key}` and `git log origin/{default_branch}..HEAD`. If a \
-PR already exists and this branch already has commits from earlier work, \
-treat this as a continuation: make only the changes the latest instruction \
-asks for, don't redo prior work.
-- Install whatever dependencies the project needs and verify your change \
-actually works (run its build/lint/test commands) before committing.
-- Commit your changes with a clear message.
-- Push before doing anything with `gh`: `git push -u origin agent/{issue_key}`. \
-If you skip this, `gh pr create` will prompt interactively for where to push, \
-and there is no terminal attached to answer it, so it will just fail.
-- If no PR exists yet for this branch, open one: `gh pr create --repo \
-{repo_full_name} --head agent/{issue_key} --base {default_branch} --title \
-"..." --body "..."`. If one already exists, do not create another - your \
-push already updated it.
-- Finish by responding with a JSON object matching the required schema: \
-"status" (one short word: done, failed, or blocked), "pr_url" (the PR's URL), \
-"summary" (a few sentences a non-engineer could read, describing what \
-changed and why).
+1. First, assess the latest instruction and determine the appropriate action:
+   - If the user is asking a QUESTION or having a discussion (e.g. "what language did you use?", "how should we design X?", "explain this file"):
+     Do NOT make code changes or git commits. Answer the user clearly and completely in "summary", leave "pr_url" empty (""), and set "status" to "question".
+   - If the task is AMBIGUOUS or you need critical clarification from the user before you can proceed:
+     Ask your clarifying questions directly to the user in "summary", leave "pr_url" empty (""), and set "status" to "question". Do NOT guess or commit code until clarified.
+   - If the instruction is a CODING or BUG FIX request (or user answering your prior questions):
+     Proceed with the implementation steps below.
+
+2. If implementing code changes:
+   - Check `gh pr list --repo {repo_full_name} --head agent/{issue_key}` and `git log origin/{default_branch}..HEAD`. If a PR or prior commits exist, treat this as a continuation: make only the changes requested, don't redo prior work.
+   - Install whatever dependencies the project needs and verify your change actually works (run its build/lint/test commands) before committing.
+   - Commit your changes with a clear message.
+   - Push before doing anything with `gh`: `git push -u origin agent/{issue_key}`.
+   - If no PR exists yet for this branch, open one: `gh pr create --repo {repo_full_name} --head agent/{issue_key} --base {default_branch} --title "..." --body "..."`. If one already exists, do not create another - your push already updated it.
+   - Set "status" to "done", set "pr_url" to the PR's URL, and describe what changed and why in "summary".
+
+3. Finish by responding with a JSON object matching the schema:
+   - "status": "done" (if code was written and PR is ready), "question" (if answering questions or asking for clarification), "blocked", or "failed".
+   - "pr_url": the PR URL (or empty string "" if answering/asking questions without new PR changes).
+   - "summary": your answer, question, or summary of code changes.
 """
 
 
@@ -95,6 +99,7 @@ class WorkItem:
     title: str
     description: str
     instruction: str
+    comments_section: str = ""
 
 
 @dataclass(frozen=True)
@@ -136,7 +141,10 @@ class Orchestrator:
     def __init__(self, litellm_base_url: str, litellm_api_key: str):
         self._litellm_base_url = litellm_base_url
         self._litellm_api_key = litellm_api_key
-        self._repos = load_repos()
+
+    @property
+    def _repos(self) -> dict[str, RepoConfig]:
+        return load_repos()
 
     async def handle(self, item: WorkItem, post_comment) -> None:
         """Entry point for a source adapter. Returns immediately if a run
@@ -146,6 +154,13 @@ class Orchestrator:
         lock = _lock_for(item.external_id)
         if lock.locked():
             state.enqueue_instruction(item.external_id, item.instruction)
+            try:
+                await post_comment(
+                    item.external_id,
+                    f"⏳ **Agent busy**: Queued instruction (will run once in-flight task completes):\n\n> {item.instruction}",
+                )
+            except Exception:
+                log.exception("Failed to post queue comment for %s", item.external_id)
             return
         asyncio.create_task(self._drain(item, post_comment))
 
@@ -179,6 +194,16 @@ class Orchestrator:
         existing = state.get_issue(item.external_id)
         is_first_run = existing is None
 
+        # Immediate acknowledgement comment
+        action = "Started" if is_first_run else "Continuing"
+        try:
+            await post_comment(
+                item.external_id,
+                f"🤖 **Agent {action.lower()} work** on `{item.external_id}`:\n\n> {item.instruction}",
+            )
+        except Exception:
+            log.exception("Failed to post acknowledgement comment for %s", item.external_id)
+
         try:
             worktree_path = await asyncio.to_thread(
                 git_ops.provision_worktree,
@@ -204,13 +229,16 @@ class Orchestrator:
             source=item.source,
             title=item.title,
             description=item.description,
+            comments_section=item.comments_section,
             instruction=item.instruction,
             default_branch=repo.default_branch,
         )
 
+        workspace_subpath = f"{repo.slug}/.worktrees/{item.external_id}"
+
         try:
             result = await self._call_agent(
-                item.external_id, prompt, resume=not is_first_run,
+                workspace_subpath, prompt, resume=not is_first_run,
             )
         except Exception as err:  # noqa: BLE001 - always report back to the issue
             log.exception("agent call failed for %s", item.external_id)
@@ -277,10 +305,10 @@ class Orchestrator:
             asyncio.create_task(self._drain(item, post_comment))
         return requeued
 
-    async def _call_agent(self, issue_key: str, prompt: str, resume: bool) -> dict:
+    async def _call_agent(self, workspace: str, prompt: str, resume: bool) -> dict:
         headers = {
             "Authorization": f"Bearer {self._litellm_api_key}",
-            "X-Aicodebox-Workspace": issue_key,
+            "X-Aicodebox-Workspace": workspace,
             "X-Aicodebox-Timeout-Seconds": str(CLAUDEBOX_TIMEOUT_SECONDS),
         }
         if resume:
@@ -308,8 +336,18 @@ def _format_result(result: dict) -> str:
     status = result.get("status", "unknown")
     pr_url = result.get("pr_url", "")
     summary = result.get("summary", "")
-    lines = [f"**Agent: {status}**"]
-    if pr_url:
+
+    if status == "question":
+        header = "💬 **Agent Response**"
+    elif status == "done":
+        header = "✅ **Agent: done**"
+    elif status == "blocked":
+        header = "⛔ **Agent: blocked**"
+    else:
+        header = f"⚠️ **Agent: {status}**"
+
+    lines = [header]
+    if pr_url and status == "done":
         lines.append(pr_url)
     if summary:
         lines.append(summary)

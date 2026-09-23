@@ -55,15 +55,25 @@ async def healthz():
 async def jira_webhook(
     request: Request,
     x_webhook_secret: str | None = Header(default=None),
+    secret: str | None = None,
 ):
-    if not jira_source.verify_webhook(x_webhook_secret):
+    token = x_webhook_secret or secret
+    if not jira_source.verify_webhook(token):
+        log.warning(
+            "Jira webhook rejected: bad secret. Header: %r, Query secret: %r, All headers: %s",
+            x_webhook_secret,
+            secret,
+            dict(request.headers),
+        )
         raise HTTPException(status_code=401, detail="bad webhook secret")
 
     payload = await request.json()
-    item = jira_source.parse_webhook(payload)
+    item = await jira_source.parse_webhook(payload)
     if item is None:
+        log.info("Jira webhook ignored (did not match trigger conditions)")
         return {"status": "ignored"}
 
+    log.info("Jira webhook accepted for issue %s; delegating to orchestrator", item.external_id)
     await orchestrator.handle(item, jira_source.post_comment)
     return {"status": "accepted"}
 
