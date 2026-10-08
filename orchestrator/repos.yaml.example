@@ -11,3 +11,6 @@
 PROJ:
   remote: https://github.com/your-org/your-repo.git
   default_branch: main
+  # Optional. When set, every agent commit on this repo credits this email
+  # as a co-author instead of Claude Code's own default AI attribution.
+  # commit_coauthor: team@your-org.com

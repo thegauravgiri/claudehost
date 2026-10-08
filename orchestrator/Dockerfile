@@ -1,6 +1,19 @@
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# docker CLI only (no local daemon) - DOCKER_HOST (docker-compose.yml) points
+# it at the dind sidecar, the same isolated sandbox runner's agent sessions
+# use, never the host's real docker. git_ops._force_remove is the only
+# caller: a worktree teardown whose files were left root-owned by a
+# container that ran as root inside dind (common default) needs root to
+# actually remove, which this uid-1000 process doesn't have on its own.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

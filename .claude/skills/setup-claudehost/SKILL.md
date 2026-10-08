@@ -1,6 +1,6 @@
 ---
 name: setup-claudehost
-description: Set up this repo's claudehost stack (LiteLLM gateway + claudebox running Claude Code) end to end, from a fresh clone to a verified-working API endpoint. Use this whenever the user wants to set up, install, bootstrap, deploy, or get running with this project for the first time - phrases like "set this up", "get this running", "how do I start this", "deploy this to the server", or "run the setup" all mean this skill, even if they don't name it. Also use it if .env is missing or incomplete and the user just tried `docker compose up`. Handles secret generation, collects the Claude Code OAuth token conversationally, boots the stack, and proves it actually works with a real request - not just that containers show "Up".
+description: Set up this repo's claudehost stack (LiteLLM gateway + runner running Claude Code) end to end, from a fresh clone to a verified-working API endpoint. Use this whenever the user wants to set up, install, bootstrap, deploy, or get running with this project for the first time - phrases like "set this up", "get this running", "how do I start this", "deploy this to the server", or "run the setup" all mean this skill, even if they don't name it. Also use it if .env is missing or incomplete and the user just tried `docker compose up`. Handles secret generation, collects the Claude Code OAuth token conversationally, boots the stack, and proves it actually works with a real request - not just that containers show "Up".
 ---
 
 # Setting up claudehost
@@ -89,7 +89,8 @@ private repos. If not, skip this entirely - it's not required for the
 stack to work, only for Claude Code to authenticate to git from inside a
 workspace.
 
-If yes and `./ssh/claudebox` doesn't already exist:
+If yes and `./ssh/claudebox` doesn't already exist (the filename is just a
+label - it's used by the `runner` service regardless of what it's called):
 
 ```bash
 mkdir -p ssh
@@ -106,24 +107,26 @@ account's key) on their git host.
 docker compose up -d --build
 ```
 
-Then run the bundled wait script rather than guessing at a sleep duration
-- claudebox's first boot installs Claude Code from npm, which has been
-observed to take anywhere from ~5 seconds to ~2 minutes depending on
-registry latency, so a fixed short sleep will falsely report failure:
+The `--build` step already installed Claude Code from npm into the
+`runner` image (this can take anywhere from ~5 seconds to ~2 minutes
+depending on registry latency, but it's part of `--build` finishing, not
+something to wait out afterward). Still run the bundled wait script
+rather than guessing at a sleep duration for container startup + litellm's
+health check:
 
 ```bash
 .claude/skills/setup-claudehost/scripts/wait_for_stack.sh
 ```
 
-If it times out, check `docker compose logs claudebox` and
+If it times out, check `docker compose logs runner` and
 `docker compose logs litellm` before assuming something is broken - it
 may just need more time on a slow connection (rerun with
 `TIMEOUT=300 .claude/skills/setup-claudehost/scripts/wait_for_stack.sh`).
 
 ## 7. Prove it actually works
 
-"Containers are up" doesn't mean the OAuth token is valid or that
-claudebox can actually reach Anthropic - the only real confirmation is a
+"Containers are up" doesn't mean the OAuth token is valid or that the
+runner can actually reach Anthropic - the only real confirmation is a
 successful response. Source the master key from `.env` and run the smoke
 test script, which mints a virtual key scoped to all four models and
 sends one real chat completion through it:
@@ -134,7 +137,7 @@ LITELLM_MASTER_KEY=$(grep '^LITELLM_MASTER_KEY=' .env | cut -d= -f2)
 ```
 
 If this fails, don't report success - debug from `docker compose logs
-claudebox` (auth errors show up there) before telling the user it's ready.
+runner` (auth errors show up there) before telling the user it's ready.
 
 ## 8. Report back
 

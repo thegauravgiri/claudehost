@@ -1,4 +1,4 @@
-# claudebox has full shell access via Claude Code - its port is never published.
+# runner has full shell access via Claude Code - its port is never published.
 services:
   db:
     image: postgres:16
@@ -23,12 +23,14 @@ services:
     restart: unless-stopped
     ports:
       - "4000:4000"
+    mem_limit: 512m
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@db:5432/litellm
       STORE_MODEL_IN_DB: "True"
       CLAUDEBOX_API_MODE_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
+      MALLOC_ARENA_MAX: 2
     volumes:
       # shared with claudebox so the auto-workspace cleanup hook can delete
       # the directories it creates (see litellm/auto_workspace_callback.py)
@@ -36,28 +38,61 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      claudebox:
+      runner:
         condition: service_started
     networks:
       - backend
 
-  claudebox:
-    # v2.3.9-full: same claudebox version as the working v2.3.9 minimal image,
-    # but pre-loaded with gh/Go/Python/Node/C++/DB-client toolchains. Required
-    # (not just an optimization) for the Jira agent flow: no-new-privileges
-    # below blocks passwordless sudo, so the minimal image's "Claude installs
-    # what it needs on the fly" escape hatch doesn't work here.
-    image: psyb0t/claudebox:v2.3.9-full
+  dind:
+    # An isolated Docker daemon for runner's agent sessions to use when a
+    # repo needs its own docker-compose.yml (real PHP/Node/DB toolchain) to
+    # run tests correctly, instead of every repo's stack needing to be
+    # pre-installed in runner's own image. Deliberately a separate daemon
+    # from the host's: privileged is required for nested Docker, so this
+    # stays contained to its own sandbox rather than mounting the host's
+    # real docker.sock, which would hand runner's agent sessions the
+    # functional equivalent of host root (control over every container on
+    # this machine, including anuvad's, and a trivial escape to the host).
+    image: docker:27-dind
+    restart: unless-stopped
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - dind_storage:/var/lib/docker
+      # Same path as runner's own mount below - a project's docker-compose.yml
+      # bind-mounting "." (e.g. "./:/var/www/html") is resolved by *this*
+      # daemon, not runner's shell, so the path has to exist here too, at
+      # the identical absolute path runner sees it at.
+      - ./workspaces:/workspace
+    mem_limit: 4g
+    networks:
+      - backend
+
+  runner:
+    # Replaces claudebox: runs the real `claude` CLI directly (no third-party
+    # container image/API-mode shim) behind the same OpenAI-compatible
+    # surface claudebox exposed, so litellm/config.yaml and the orchestrator
+    # don't need to know the difference. See runner/server.py + executor.py.
+    build:
+      context: ./runner
     restart: unless-stopped
     environment:
-      CLAUDEBOX_API_MODE: "1"
-      CLAUDEBOX_API_MODE_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
+      RUNNER_API_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      # Fallback only - the orchestrator always sends its own value via the
+      # X-Aicodebox-Timeout-Seconds header. See core.AGENT_TIMEOUT_SECONDS
+      # in the orchestrator service below for why this needs to be generous.
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-3600}
+      # Points the docker CLI (installed, no local daemon) at the dind
+      # sidecar - a `docker compose up` an agent session runs lands there,
+      # isolated from the host's real Docker. No TLS: internal-only network.
+      DOCKER_HOST: tcp://dind:2375
       CLAUDEBOX_GIT_NAME: ${CLAUDEBOX_GIT_NAME}
       CLAUDEBOX_GIT_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
-      # v2.3.9 doesn't wire CLAUDEBOX_GIT_NAME/EMAIL into git itself (no
-      # gitconfig is ever written) - git reads these directly instead, so
-      # they're the actual source of commit identity for agent commits.
+      # No gitconfig is ever written for these - git reads the GIT_AUTHOR_*/
+      # GIT_COMMITTER_* env vars directly instead, so they're the actual
+      # source of commit identity for agent commits.
       GIT_AUTHOR_NAME: ${CLAUDEBOX_GIT_NAME}
       GIT_AUTHOR_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
       GIT_COMMITTER_NAME: ${CLAUDEBOX_GIT_NAME}
@@ -87,7 +122,6 @@ services:
       # orchestrator/git_ops.py). Read-write: agent commits/pushes write
       # directly into these bare repos through the worktree's commondir.
       - ./repos:/repos
-    # cap_drop: ALL breaks this image's entrypoint (needs CAP_DAC_OVERRIDE)
     security_opt:
       - no-new-privileges:true
     # Raised from 4g/2 for the Jira agent flow: cpus is a CFS quota, not a
@@ -98,6 +132,9 @@ services:
     mem_limit: 7g
     cpus: 2
     pids_limit: 512
+    depends_on:
+      dind:
+        condition: service_started
     networks:
       - backend
 
@@ -106,44 +143,85 @@ services:
       context: ./orchestrator
     restart: unless-stopped
     ports:
-      - "80:8090"
-      - "8090:8090"
+      # Not published to the world: see claudehost_edge below. Host-only, for
+      # local debugging (curl localhost:8090/healthz).
+      - "127.0.0.1:8090:8090"
     environment:
       LITELLM_BASE_URL: http://litellm:4000
       LITELLM_API_KEY: ${ORCHESTRATOR_LITELLM_KEY}
+      # How long a single agent call (cloning, installing deps, running a
+      # project's own Docker-based test suite, pushing) gets before runner
+      # gives up and this process's own client stops waiting. Several real
+      # fix rounds against a heavier repo (Laravel + Playwright) ran right up
+      # against the old 1800s default and got cut off before they could
+      # commit - raise this if that keeps happening even at 3600s.
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-3600}
+      # Points the docker CLI (installed, no local daemon) at the same
+      # isolated dind sandbox runner's agent sessions use, never the host's
+      # real docker - git_ops._force_remove's only use for it, cleaning up a
+      # worktree a container running as root inside dind left root-owned
+      # files in (this process runs as uid 1000, see `user:` below, and
+      # can't remove those on its own).
+      DOCKER_HOST: tcp://dind:2375
       JIRA_BASE_URL: ${JIRA_BASE_URL}
       JIRA_EMAIL: ${JIRA_EMAIL}
       JIRA_API_TOKEN: ${JIRA_API_TOKEN}
       JIRA_WEBHOOK_SECRET: ${JIRA_WEBHOOK_SECRET}
       GH_TOKEN: ${GH_TOKEN}
       GH_WEBHOOK_SECRET: ${GH_WEBHOOK_SECRET}
-      # Same insteadOf rewrite as claudebox, so the orchestrator's own git
+      CODERABBIT_LOGIN: ${CODERABBIT_LOGIN:-coderabbitai[bot]}
+      CODERABBIT_MAX_ITERATIONS: ${CODERABBIT_MAX_ITERATIONS:-10}
+      CODERABBIT_CI_COMBINE_WAIT_SECONDS: ${CODERABBIT_CI_COMBINE_WAIT_SECONDS:-300}
+      CI_CHECK_APP_SLUG: ${CI_CHECK_APP_SLUG:-github-actions}
+      # How long an Actions run can sit queued/in_progress before a fix round
+      # gives up on it, cancels it via the API, and runs the full suite
+      # itself instead - what should have happened the one time CI ran for
+      # 6 hours straight without finishing.
+      CI_STUCK_SECONDS: ${CI_STUCK_SECONDS:-900}
+      # Same insteadOf rewrite as runner, so the orchestrator's own git
       # operations (clone/fetch/worktree add) authenticate identically.
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf
       GIT_CONFIG_VALUE_0: https://github.com/
     volumes:
-      # Same absolute paths as claudebox: git worktree bakes absolute paths
+      # Same absolute paths as the runner: git worktree bakes absolute paths
       # into its metadata, so the directory a worktree is created under here
-      # must resolve to the same path claudebox sees it at.
+      # must resolve to the same path the runner sees it at.
       - ./workspaces:/workspace
       - ./repos:/repos
       - ./orchestrator:/app
       - orchestrator_state:/state
-    # Matches the aicode user's uid/gid in claudebox. Anything this service
+    # Matches the aicode user's uid/gid in the runner. Anything this service
     # creates under /workspace or /repos must be writable by that uid, not
     # just root - see orchestrator/README for why this isn't optional.
     user: "1000:1000"
     depends_on:
       litellm:
         condition: service_started
+      dind:
+        condition: service_started
     networks:
-      - backend
+      backend:
+      # Lets a reverse proxy running in another docker-compose project reach
+      # this service by the "claudehost-orchestrator" alias without being on
+      # "backend" too - "backend" also carries the runner, which has full
+      # shell access via Claude Code, and the proxy container has no
+      # business reaching that.
+      edge:
+        aliases:
+          - claudehost-orchestrator
 
 networks:
   backend:
+  # Shared with anuvad's docker-compose project (its Caddy proxies
+  # claudehost.gauravgiri.com.np through it) - external on both sides, so
+  # neither project claims ownership of a network the other also depends on.
+  edge:
+    name: claudehost_edge
+    external: true
 
 volumes:
   postgres_data:
   claude_auth:
   orchestrator_state:
+  dind_storage:

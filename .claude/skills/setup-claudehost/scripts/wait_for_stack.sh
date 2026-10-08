@@ -1,21 +1,22 @@
 #!/bin/sh
-# Waits for claudebox to finish its first-run `npm install` of Claude Code
-# (observed anywhere from ~5s to ~2min depending on npm registry latency)
-# and for litellm to report healthy. Run from the repo root.
+# Waits for the runner to report ready and for litellm to report healthy.
+# Claude Code is installed at image build time (not on first boot, unlike
+# the old claudebox-based setup), so this is normally quick - a few seconds.
+# Run from the repo root.
 set -eu
 
 LITELLM_PORT="${LITELLM_PORT:-4000}"
 TIMEOUT="${TIMEOUT:-180}"
 elapsed=0
 
-echo "Waiting for claudebox to finish installing Claude Code..."
+echo "Waiting for the runner to come up..."
 while true; do
-    if docker compose logs claudebox 2>&1 | grep -q "Uvicorn running"; then
-        echo "claudebox is up."
+    if docker compose logs runner 2>&1 | grep -q "Uvicorn running"; then
+        echo "runner is up."
         break
     fi
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
-        echo "Timed out after ${TIMEOUT}s waiting for claudebox. Check: docker compose logs claudebox" >&2
+        echo "Timed out after ${TIMEOUT}s waiting for runner. Check: docker compose logs runner" >&2
         exit 1
     fi
     sleep 5

@@ -10,10 +10,13 @@ branch into two worktrees, so two issues can never step on each other's files or
 history.
 """
 import fcntl
+import logging
 import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
+
+log = logging.getLogger("orchestrator.git_ops")
 
 WORKSPACES_ROOT = Path("/workspace")
 GIT_TIMEOUT = 120
@@ -48,6 +51,57 @@ def _repo_path(slug: str) -> Path:
 
 def _worktree_path(slug: str, issue_key: str) -> Path:
     return _repo_path(slug) / ".worktrees" / issue_key
+
+
+def _pr_worktree_path(slug: str, pr_number: int) -> Path:
+    return _repo_path(slug) / ".worktrees" / f"pr-{pr_number}"
+
+
+def _force_remove(path: Path) -> None:
+    """Deletes `path` even if it contains root-owned files - a repo's own
+    docker-compose.yml, or a bare `docker run` the agent invoked, commonly
+    defaults to running as root inside dind, so files it writes through the
+    shared /workspace bind mount land root-owned on the real host
+    filesystem. This process runs as uid 1000 (see docker-compose.yml's
+    orchestrator `user:` setting, deliberately non-root) and can't remove
+    those directly - a plain shutil.rmtree(ignore_errors=True) used to just
+    silently leave them behind, which is exactly what let closed PRs'
+    worktrees accumulate on disk indefinitely instead of actually being
+    torn down. Falls back to a throwaway privileged container against the
+    same isolated dind sandbox the agent's own test containers already use
+    (never the host's real docker), which can.
+    """
+    try:
+        shutil.rmtree(path)
+        return
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass  # most likely root-owned files left by a container that ran as root
+
+    try:
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{WORKSPACES_ROOT}:{WORKSPACES_ROOT}", "alpine", "rm", "-rf", str(path)],
+            capture_output=True, text=True, timeout=GIT_TIMEOUT, check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as err:
+        raise GitOpsError(f"couldn't remove {path} even via a privileged cleanup container: {err}") from err
+
+
+def _worktree_path_for_branch(repo_dir: Path, branch: str) -> Path | None:
+    """The path of whichever existing worktree already has `branch` checked
+    out, if any. Must be called with _repo_lock held - it doesn't take the
+    lock itself, since every caller already holds it.
+    """
+    out = _run(["git", "worktree", "list", "--porcelain"], cwd=repo_dir)
+    current_path: str | None = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):]
+        elif line.startswith("branch ") and current_path:
+            if line[len("branch "):] == f"refs/heads/{branch}":
+                return Path(current_path)
+    return None
 
 
 @contextmanager
@@ -110,8 +164,53 @@ def provision_worktree(slug: str, remote_url: str, issue_key: str, default_branc
     return worktree_path
 
 
+def provision_pr_worktree(
+    slug: str, remote_url: str, pr_number: int, head_ref: str, default_branch: str,
+) -> Path:
+    """Create (or sync) the worktree for a PR's head branch, for the
+    CodeRabbit auto-fix loop. Unlike provision_worktree, head_ref already
+    exists on origin - this checks it out (and, on later iterations, resets
+    it to origin's current tip so a push a human made in between is picked
+    up) rather than branching fresh off the default branch.
+
+    If head_ref is already checked out in another worktree - the Jira flow's
+    agent/<KEY> branch, when this PR is that flow's own PR - git refuses a
+    second checkout of the same branch; reuse that worktree's path instead
+    of creating a second one.
+    """
+    repo_dir = _repo_path(slug)
+    worktree_path = _pr_worktree_path(slug, pr_number)
+    with _repo_lock(slug):
+        ensure_repo(slug, remote_url, default_branch)
+
+        existing = _worktree_path_for_branch(repo_dir, head_ref)
+        if existing is not None and existing != worktree_path:
+            # Someone else's worktree (e.g. the Jira flow's agent/<KEY>
+            # branch) - reuse it as-is, don't reset state it may be
+            # mid-edit in.
+            verify_worktree(existing)
+            return existing
+
+        if worktree_path.is_dir():
+            _run(["git", "worktree", "prune", "--expire=now"], cwd=repo_dir)
+
+        if not worktree_path.is_dir():
+            worktree_path.parent.mkdir(parents=True, exist_ok=True)
+            _run(
+                [
+                    "git", "worktree", "add", str(worktree_path),
+                    "-B", head_ref, f"origin/{head_ref}",
+                ],
+                cwd=repo_dir,
+            )
+        else:
+            _run(["git", "reset", "--hard", f"origin/{head_ref}"], cwd=worktree_path)
+    verify_worktree(worktree_path)
+    return worktree_path
+
+
 def verify_worktree(worktree_path: Path) -> None:
-    """Raise if claudebox would find an empty dir instead of a real repo."""
+    """Raise if the runner would find an empty dir instead of a real repo."""
     try:
         _run(["git", "rev-parse", "--git-dir"], cwd=worktree_path)
     except GitOpsError as err:
@@ -145,7 +244,10 @@ def teardown_worktree(slug: str, issue_key: str) -> None:
                     cwd=repo_dir,
                 )
         except GitOpsError:
-            shutil.rmtree(worktree_path, ignore_errors=True)
+            try:
+                _force_remove(worktree_path)
+            except GitOpsError:
+                log.exception("couldn't fully remove worktree %s - left on disk", worktree_path)
             try:
                 _run(["git", "worktree", "prune", "--expire=now"], cwd=repo_dir)
             except GitOpsError:
@@ -154,6 +256,32 @@ def teardown_worktree(slug: str, issue_key: str) -> None:
             _run(["git", "branch", "-D", branch], cwd=repo_dir)
         except GitOpsError:
             pass
+
+
+def teardown_pr_worktree(slug: str, pr_number: int) -> None:
+    """Removes the .worktrees/pr-<n> worktree the CodeRabbit loop used, if
+    one exists at that path. Never deletes the branch itself (unlike
+    teardown_worktree): it's the PR's real branch, not one this orchestrator
+    owns, and provision_pr_worktree may have reused another flow's worktree
+    for it instead of creating one here - in which case there's nothing at
+    this path to remove anyway.
+    """
+    repo_dir = _repo_path(slug)
+    worktree_path = _pr_worktree_path(slug, pr_number)
+    with _repo_lock(slug):
+        if not worktree_path.is_dir():
+            return
+        try:
+            _run(["git", "worktree", "remove", "--force", str(worktree_path)], cwd=repo_dir)
+        except GitOpsError:
+            try:
+                _force_remove(worktree_path)
+            except GitOpsError:
+                log.exception("couldn't fully remove worktree %s - left on disk", worktree_path)
+            try:
+                _run(["git", "worktree", "prune", "--expire=now"], cwd=repo_dir)
+            except GitOpsError:
+                pass
 
 
 def list_prunable(slug: str) -> list[str]:

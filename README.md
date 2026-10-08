@@ -12,7 +12,7 @@ Anthropic sells two different products: an API key (metered, pay per token) and 
 Two pieces do the work:
 
 - **[LiteLLM](https://docs.litellm.ai/)**: the gateway. Issues per-developer API keys, tracks spend, exposes `/v1/chat/completions`.
-- **[claudebox](https://github.com/psyb0t/docker-claudebox)**: runs the actual `claude` CLI in a container and exposes it as an OpenAI-compatible backend, authenticated with your subscription.
+- **`runner`**: this repo's own small FastAPI service (see [`runner/`](runner)). Shells out to the real `claude` CLI and exposes it as an OpenAI-compatible backend, authenticated with your subscription.
 
 ## Features
 
@@ -25,15 +25,13 @@ Two pieces do the work:
 ## Architecture
 
 ```
-developer -> litellm :4000 (published)  -> claudebox :8080 (internal only) -> Claude Code -> Anthropic
+developer -> litellm :4000 (published)  -> runner :8080 (internal only) -> Claude Code -> Anthropic
               virtual keys, spend
 ```
 
-Only `litellm`'s port is published. `claudebox` gets real shell access via Claude Code, so it's reachable only on the internal Docker network.
+Only `litellm`'s port is published. `runner` gets real shell access via Claude Code, so it's reachable only on the internal Docker network.
 
 ## Quick start
-
-`claudebox`'s source is vendored as a git submodule; `git clone --recurse-submodules` pulls it in, or run `git submodule update --init` afterward if you already cloned without it. It's there for reference only, not needed to run the stack (`docker compose` pulls the built image from Docker Hub).
 
 ```bash
 cp .env.example .env
@@ -86,12 +84,12 @@ An Anthropic API key bills per token: the cost scales with every request from ev
 
 LiteLLM still tracks spend per key for visibility. Each model's `pricing_ref` in `litellm/config.yaml` names the real Anthropic model to price it like, and `litellm/render_pricing.py` resolves that to actual per-token rates from LiteLLM's own bundled cost map at build time. Nothing is billed against these numbers; they're shown purely so you can see who's using how much.
 
-The tradeoff is capacity, not cost: a subscription has its own rate limits shared across everyone calling the gateway, and Anthropic's consumer-plan terms are written around individual use rather than a team reselling access through an API. That's a deliberate tradeoff for cost, not a compliance-cleared setup. For high-volume or compliance-sensitive workloads, set `ANTHROPIC_API_KEY` instead and pay per token; claudebox supports both.
+The tradeoff is capacity, not cost: a subscription has its own rate limits shared across everyone calling the gateway, and Anthropic's consumer-plan terms are written around individual use rather than a team reselling access through an API. That's a deliberate tradeoff for cost, not a compliance-cleared setup. For high-volume or compliance-sensitive workloads, set `ANTHROPIC_API_KEY` instead and pay per token; the runner supports both (whatever `claude` itself supports).
 
 ## Security
 
-- **Read claudebox's source before trusting it with your subscription token.** It's vendored as a git submodule at [`claudebox/`](claudebox) (upstream: [psyb0t/docker-claudebox](https://github.com/psyb0t/docker-claudebox)), so it's already in this repo, no separate clone needed. It runs Claude Code with `--permission-mode bypassPermissions` and passwordless sudo, so any request that reaches it can run arbitrary commands in whatever workspace it's pointed at. It's a small, single-maintainer project without an independent security audit; the source is clean (no telemetry, no obfuscation), but treat it like any small dependency, not a heavily-reviewed one.
-- Put `litellm`'s published port behind TLS and restrict it to your VPN or office IP range before calling this production. The compose file itself does no network restriction beyond keeping `claudebox` off the public port.
+- **`runner` runs Claude Code with `--permission-mode bypassPermissions`**, so any request that reaches it can run arbitrary commands in whatever workspace it's pointed at. It's this repo's own code ([`runner/`](runner)), not a third-party image, so read it before trusting it with your subscription token like you would any code with that much access.
+- Put `litellm`'s published port behind TLS and restrict it to your VPN or office IP range before calling this production. The compose file itself does no network restriction beyond keeping `runner` off the public port.
 
 ## Configuration reference
 
@@ -100,12 +98,16 @@ The tradeoff is capacity, not cost: a subscription has its own rate limits share
 | `LITELLM_MASTER_KEY` | `litellm` | Root credential; mints/revokes virtual keys, also the admin UI password |
 | `LITELLM_SALT_KEY` | `litellm` | Encrypts provider credentials LiteLLM stores in Postgres |
 | `POSTGRES_PASSWORD` | `db`, `litellm` | Postgres auth for the virtual-key/spend-tracking database |
-| `CLAUDEBOX_API_MODE_TOKEN` | `litellm`, `claudebox` | Shared bearer secret between the gateway and the Claude Code backend |
-| `CLAUDE_CODE_OAUTH_TOKEN` | `claudebox` | Claude subscription auth, from `claude setup-token` |
-| `CLAUDEBOX_GIT_NAME` / `CLAUDEBOX_GIT_EMAIL` | `claudebox` | Git identity for commits made inside agentic sessions (fed to git via `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars - the pinned claudebox version doesn't wire these into a gitconfig itself) |
+| `CLAUDEBOX_API_MODE_TOKEN` | `litellm`, `runner` | Shared bearer secret between the gateway and the Claude Code backend |
+| `CLAUDE_CODE_OAUTH_TOKEN` | `runner` | Claude subscription auth, from `claude setup-token` |
+| `CLAUDEBOX_GIT_NAME` / `CLAUDEBOX_GIT_EMAIL` | `runner` | Git identity for commits made inside agentic sessions (fed to git via `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars - git never reads these two directly itself) |
 | `ORCHESTRATOR_LITELLM_KEY` | `orchestrator` | Virtual key the orchestrator authenticates to `litellm` with |
-| `GH_TOKEN` | `claudebox`, `orchestrator` | Fine-grained GitHub PAT: git push/pull and `gh pr create` for the Jira agent flow |
-| `GH_WEBHOOK_SECRET` | `orchestrator` | Verifies inbound GitHub webhooks (PR merged/closed) |
+| `GH_TOKEN` | `runner`, `orchestrator` | Fine-grained GitHub PAT: git push/pull, `gh pr create`, and the CodeRabbit loop's PR comments/reviews API calls |
+| `GH_WEBHOOK_SECRET` | `orchestrator` | Verifies inbound GitHub webhooks (PR merged/closed, CodeRabbit reviews) |
+| `CODERABBIT_LOGIN` | `orchestrator` | GitHub login the auto-fix loop reacts to for reviews; ignores everything else so it can't be triggered by anyone else's comment |
+| `CODERABBIT_MAX_ITERATIONS` | `orchestrator` | Fix-round cap per PR before the loop gives up and asks a human |
+| `CODERABBIT_CI_COMBINE_WAIT_SECONDS` | `orchestrator` | How long to wait for CodeRabbit/CI's counterpart to also report on a commit before fixing just the one that has |
+| `CI_CHECK_APP_SLUG` | `orchestrator` | The GitHub App slug for CI check suites to react to (default `github-actions`) |
 | `JIRA_BASE_URL` / `JIRA_EMAIL` / `JIRA_API_TOKEN` | `orchestrator` | Jira Cloud REST API auth for reading `/agent` comments and posting results |
 | `JIRA_WEBHOOK_SECRET` | `orchestrator` | Verifies inbound Jira webhooks |
 
@@ -128,12 +130,31 @@ How it stays possible for three issues on the same repo to run at once: each iss
 
 Setup:
 
-1. Switch `claudebox`'s image to the `-full` variant (already done in `docker-compose.yml`) - the flow needs `gh` and language toolchains preinstalled, since `security_opt: no-new-privileges` blocks the minimal image's usual "install what you need via sudo" fallback.
-2. Fill in the Jira/GitHub block in `.env` (see `.env.example`) - a Jira Cloud API token, a fine-grained GitHub PAT scoped to `Contents` and `Pull requests` on the repos you want it to touch, and two webhook secrets (`generate_secrets.sh` can generate those two).
-3. List your repos in `orchestrator/repos.yaml`: Jira project key → GitHub remote + default branch.
-4. Point a Jira Automation rule (comment created/updated) at the orchestrator's webhook endpoint, and a GitHub webhook (pull request closed) at the same service, using the two secrets from step 2.
+1. Fill in the Jira/GitHub block in `.env` (see `.env.example`) - a Jira Cloud API token, a fine-grained GitHub PAT scoped to `Contents` and `Pull requests` on the repos you want it to touch, and two webhook secrets (`generate_secrets.sh` can generate those two).
+2. List your repos in `orchestrator/repos.yaml`: Jira project key → GitHub remote + default branch.
+3. Point a Jira Automation rule (comment created/updated) at the orchestrator's webhook endpoint, and a GitHub webhook (pull request closed) at the same service, using the two secrets from step 1.
 
-`workspaces/CLAUDE.md` and `.init-done` live on claudebox's persistent volume and are only generated on first container create - if you're switching an existing deployment to the `-full` image, delete both so they regenerate with the full toolchain list; otherwise the agent is told it's on the minimal image and it isn't.
+`runner/Dockerfile` only installs Python, git, and `gh` - not the Go/Terraform/kubectl-sized toolchain claudebox's `-full` image shipped. `security_opt: no-new-privileges` means an agent session can't `sudo apt-get install` its way around a missing tool either. If your repos need more than that, add it to `runner/Dockerfile`.
+
+## PR auto-fix loop: CodeRabbit + CI
+
+The same `orchestrator` service also closes the loop on [CodeRabbit](https://coderabbit.ai) reviews and GitHub Actions CI failures on a PR in one of your `repos.yaml` repos. It does **nothing on a PR until someone asks it to** - see `/agent go` below.
+
+Once armed, it waits for CodeRabbit's review and/or CI to report on a commit, combines whatever feedback they left into a single fix round rather than reacting to each separately, pushes the fix, asks CodeRabbit to look again (`@coderabbitai review` - CI reruns on its own), and repeats. Once both come back clean, it comments to @-mention the PR's author that it's ready for human review/merge. It gives up and asks for human help after `CODERABBIT_MAX_ITERATIONS` rounds (default 5) on one PR.
+
+"Combines" means: the first of the two to report on a commit is held rather than acted on immediately, waiting up to `CODERABBIT_CI_COMBINE_WAIT_SECONDS` (default 5 minutes) for the other to also report on that same commit. If it does, one fix round addresses both. If it doesn't - the repo only has one of the two configured, or it's just slow - that one fix round goes out alone once the wait elapses, rather than waiting forever.
+
+It introduces itself with a comment as soon as a PR opens (it doesn't start working yet), and takes two commands posted as PR comments:
+
+- `/agent go` - arms the loop for this PR. If CodeRabbit has already reviewed, it's checked right away (same combine-and-wait behavior as above); if not, nothing happens until CodeRabbit or CI next reports on a commit.
+- `/agent stop` - the loop ignores every CodeRabbit review and CI result on this PR from then on, until `/agent go` again.
+
+Setup (shares the GitHub webhook and `GH_TOKEN` with the Jira flow above - fill those in regardless of which flow you use):
+
+1. Make sure the repo is in `orchestrator/repos.yaml` and CodeRabbit is installed on it.
+2. On the GitHub webhook (same one as above), subscribe to **Pull request reviews**, **Issue comments**, and **Check suites** in addition to **Pull requests** - respectively: CodeRabbit's review, `/agent stop|go` (PR comments are delivered as `issue_comment` events), and GitHub Actions CI results.
+3. `GH_TOKEN` needs `Issues: read/write` added on top of the Jira flow's scopes (posting a PR status comment is the `issues/{n}/comments` API even when `{n}` is a PR), plus `Checks: read` and `Actions: read` for the CI half specifically (reading check-run conclusions and downloading job logs). Drop the last two if you only want the CodeRabbit half.
+4. CI results only work for GitHub Actions - see `CI_CHECK_APP_SLUG` in `.env.example` if you need a different check provider (and note its logs won't be fetchable the same way, since that's an Actions-specific API).
 
 ## License
 

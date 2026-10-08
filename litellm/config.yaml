@@ -1,32 +1,49 @@
 # Workspace selection: X-Aicodebox-Workspace header, not the `workspace`
 # body field (unsupported in the pinned claudebox version).
+#
+# num_retries: 0 on every model below - these calls run a real agent session
+# against runner (often 10-30+ minutes: cloning, installing deps, running a
+# project's own test suite), not a quick completion. The underlying OpenAI
+# SDK client litellm uses to call an "openai-compatible" custom endpoint like
+# runner retries 5xx/timeouts by default - silently re-running the *entire*
+# session from scratch on a timeout, discarding whatever the first attempt
+# had already done (including, worst case, a commit or push it made just
+# before being killed) and burning most of the orchestrator's own separate
+# client-side timeout budget before the retry can even finish. A timeout from
+# runner should propagate once, cleanly, back to the orchestrator - which
+# already has its own reporting for that (see pr_autofix.run_fix_round) -
+# not get silently retried underneath it.
 model_list:
   - model_name: claude-haiku
     litellm_params:
       model: openai/haiku
-      api_base: http://claudebox:8080/openai/v1
+      api_base: http://runner:8080/openai/v1
       api_key: os.environ/CLAUDEBOX_API_MODE_TOKEN
+      num_retries: 0
     model_info:
       pricing_ref: claude-haiku-4-5
   - model_name: claude-sonnet
     litellm_params:
       model: openai/sonnet
-      api_base: http://claudebox:8080/openai/v1
+      api_base: http://runner:8080/openai/v1
       api_key: os.environ/CLAUDEBOX_API_MODE_TOKEN
+      num_retries: 0
     model_info:
       pricing_ref: claude-sonnet-5
   - model_name: claude-opus
     litellm_params:
       model: openai/opus
-      api_base: http://claudebox:8080/openai/v1
+      api_base: http://runner:8080/openai/v1
       api_key: os.environ/CLAUDEBOX_API_MODE_TOKEN
+      num_retries: 0
     model_info:
       pricing_ref: claude-opus-5
   - model_name: claude-opusplan
     litellm_params:
       model: openai/opusplan
-      api_base: http://claudebox:8080/openai/v1
+      api_base: http://runner:8080/openai/v1
       api_key: os.environ/CLAUDEBOX_API_MODE_TOKEN
+      num_retries: 0
     model_info:
       pricing_ref: claude-opus-5
 
