@@ -30,6 +30,7 @@ app = FastAPI(title="Claude Host Runner", version="1.0.0")
 CONVERSATION_TTL_SECONDS = int(os.environ.get("CONVERSATION_TTL_SECONDS", "3600"))
 CONVERSATION_MAX_ENTRIES = int(os.environ.get("CONVERSATION_MAX_ENTRIES", "500"))
 AUTO_PREFIX = "auto-"
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 # Hidden thinking can run away (one real call spent 128k output tokens on a
 # 250-token answer and took 459s, past the caller's 300s client timeout, and
 # LiteLLM does not cancel upstream calls when its client gives up). So
@@ -177,6 +178,7 @@ async def chat_completions(
 
     # A stateless caller with no workspace must not share the default one, or
     # concurrent requests collide on it (409) instead of being processed.
+    client_set_workspace = workspace is not None
     if workspace is None and not resume:
         workspace = f"{AUTO_PREFIX}{uuid.uuid4()}"
 
@@ -225,6 +227,16 @@ async def chat_completions(
     # asked for no thinking and didn't pick an effort itself.
     if req.thinking and req.thinking.get("type") == "disabled" and "--effort" not in extra_args:
         extra_args = [*extra_args, "--effort", "low"]
+    # A caller that names no workspace wants a plain completion, not a coding
+    # agent. Without these defaults Claude Code loads its full tool set and
+    # system prompt (~18k tokens per call instead of ~700). This used to live
+    # only in the LiteLLM callback, which skips any model name it doesn't know,
+    # such as per-account names like "mcm-claude-sonnet".
+    stateless_call = not client_set_workspace and not resume
+    if stateless_call and not system_parts:
+        system_parts.append(DEFAULT_SYSTEM_PROMPT)
+    if stateless_call and "--safe-mode" not in extra_args:
+        extra_args = [*extra_args, "--safe-mode"]
     system_prompt = "\n\n".join(system_parts) if system_parts else None
 
     # JSON Schema
@@ -235,7 +247,10 @@ async def chat_completions(
         elif req.response_format.get("type") == "json_object":
             json_schema = {"type": "object"}
 
-    no_tools = (x_aicodebox_no_tools or "").lower() in ("1", "true", "yes")
+    if x_aicodebox_no_tools is not None:
+        no_tools = x_aicodebox_no_tools.lower() in ("1", "true", "yes")
+    else:
+        no_tools = stateless_call
 
     # Only stateless callers (no explicit workspace, or a throwaway auto-
     # one) get conversation resume; stateful callers manage their own.
