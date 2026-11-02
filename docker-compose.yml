@@ -1,4 +1,4 @@
-# claudebox has full shell access via Claude Code - its port is never published.
+# runner has full shell access via Claude Code - its port is never published.
 services:
   db:
     image: postgres:16
@@ -30,27 +30,39 @@ services:
       STORE_MODEL_IN_DB: "True"
       CLAUDEBOX_API_MODE_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
     volumes:
-      # shared with claudebox so the auto-workspace cleanup hook can delete
+      # shared with runner so the auto-workspace cleanup hook can delete
       # the directories it creates (see litellm/auto_workspace_callback.py)
       - ./workspaces:/workspaces
     depends_on:
       db:
         condition: service_healthy
-      claudebox:
+      runner:
         condition: service_started
     networks:
       - backend
 
-  claudebox:
-    # latest/v2.4.2 crash-loop on startup (packaging bug). v2.3.9 is confirmed working.
-    image: psyb0t/claudebox:v2.3.9
+  runner:
+    # Runs the real `claude` CLI behind an OpenAI-compatible endpoint. Replaces
+    # the claudebox image: same X-Aicodebox-* headers, plus session resume,
+    # tool calling, per-account OAuth tokens and usage limits (runner/).
+    build:
+      context: ./runner
     restart: unless-stopped
+    # Extra Claude subscriptions: CLAUDE_OAUTH_TOKEN_<NAME>=... lines (see
+    # claude-accounts.env.example). Optional - the file may be absent.
+    env_file:
+      - path: ./claude-accounts.env
+        required: false
     environment:
-      CLAUDEBOX_API_MODE: "1"
-      CLAUDEBOX_API_MODE_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
+      RUNNER_API_TOKEN: ${CLAUDEBOX_API_MODE_TOKEN}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
       CLAUDEBOX_GIT_NAME: ${CLAUDEBOX_GIT_NAME}
       CLAUDEBOX_GIT_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
+      # git reads these directly, so agent commits carry this identity.
+      GIT_AUTHOR_NAME: ${CLAUDEBOX_GIT_NAME}
+      GIT_AUTHOR_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
+      GIT_COMMITTER_NAME: ${CLAUDEBOX_GIT_NAME}
+      GIT_COMMITTER_EMAIL: ${CLAUDEBOX_GIT_EMAIL}
       # ./ssh mounts as a directory, so the key generated at ssh/claudebox
       # lands at this nested path, not somewhere ssh checks by default.
       GIT_SSH_COMMAND: ssh -i /home/aicode/.ssh/claudebox/claudebox -o UserKnownHostsFile=/home/aicode/.ssh/known_hosts -o IdentitiesOnly=yes
@@ -58,7 +70,6 @@ services:
       - claude_auth:/home/aicode/.claude
       - ./ssh:/home/aicode/.ssh/claudebox:ro
       - ./workspaces:/workspace
-    # cap_drop: ALL breaks this image's entrypoint (needs CAP_DAC_OVERRIDE)
     security_opt:
       - no-new-privileges:true
     mem_limit: 4g

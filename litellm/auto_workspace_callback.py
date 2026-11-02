@@ -1,17 +1,17 @@
 """This callback is registered globally in litellm_settings.callbacks, so it
 fires for every model on this gateway - including ones that have nothing to
-do with claudebox (e.g. a directly-configured Azure/OpenAI model). Every
-change below only ever applies to the claudebox-backed model names in
+do with the runner (e.g. a directly-configured Azure/OpenAI model). Every
+change below only ever applies to the runner-backed model names in
 CLAUDEBOX_MODELS; anything else returns untouched on the first line.
 
-For claudebox models:
+For runner models:
 
 Assigns a random workspace to any request that doesn't set one, so
 stateless callers don't collide on the shared default workspace and hit
 "409 workspace busy" under concurrent load. Requests that set
 X-Aicodebox-Workspace themselves are left untouched. Auto-assigned
 workspaces are single-use and deleted right after the call finishes; this
-container shares the ./workspaces mount with claudebox so the directory it
+container shares the ./workspaces mount with the runner so the directory it
 created is visible here too.
 
 Auto-assigned requests also get X-Aicodebox-No-Tools and a minimal
@@ -27,19 +27,6 @@ these respectively. (--bare would disable CLAUDE.md discovery too, but
 also forces API-key-only auth and drops OAuth/subscription auth
 entirely - not usable here.)
 
-claudebox has its own separate, always-on mechanism for this on top of
-Claude Code's own: it reads a container "system hint" file
-(~70 tokens, container/sudo/docker-socket context - useful for a real
-agentic session, irrelevant for a stateless one) and appends it via
---append-system-prompt on every call, regardless of --safe-mode or our
---system-prompt override. There's no per-request flag to disable this
-directly, but a duplicate, empty --append-system-prompt placed after it
-in argv overrides it (confirmed: Claude Code takes the last occurrence
-of a repeated flag, not the first, and not a concatenation of both) -
-cutting a further ~70 tokens (215 -> 143, verified) for workspace-less
-calls without touching the explicit-workspace path, where that context
-is still exactly what a real agentic session needs.
-
 --exclude-dynamic-system-prompt-sections was tried first here and is
 NOT used: its own help text says it's ignored whenever --system-prompt
 is set, and a system message (the caller's or our injected default) is
@@ -47,16 +34,17 @@ now always present for a workspace-less call, so it would always be a
 no-op in this configuration.
 
 Also translates the standard OpenAI `reasoning`/`reasoning_effort`
-parameters into claudebox's `--effort` CLI flag via
+parameters into the runner's `--effort` CLI flag via
 X-Aicodebox-Extra-Args, for both workspace and workspace-less calls -
-claudebox accepts but never wires those OpenAI-standard fields to
-anything, so without this translation they're silently inert.
+the runner's /openai/v1/chat/completions accepts but never wires those
+OpenAI-standard fields to anything, so without this translation they're
+silently inert.
 
 All of the X-Aicodebox-Extra-Args injections above (safe-mode, effort)
 are skipped whenever the client already sent its own Extra-Args header:
 forward_client_headers_to_llm_api forwards the client's raw header
 regardless of what this hook sets in data["extra_headers"], so setting
-both results in claudebox receiving an invalid, comma-joined value. Same
+both results in the runner receiving an invalid, comma-joined value. Same
 guard applies to X-Aicodebox-Workspace and X-Aicodebox-No-Tools.
 """
 import json
@@ -74,9 +62,6 @@ WORKSPACE_HEADER = "X-Aicodebox-Workspace"
 EXTRA_ARGS_HEADER = "X-Aicodebox-Extra-Args"
 NO_TOOLS_HEADER = "X-Aicodebox-No-Tools"
 SAFE_MODE_FLAG = "--safe-mode"
-# Empty string overrides claudebox's own always-on container-hint append,
-# since the CLI takes the last occurrence of a repeated flag.
-SUPPRESS_HINT_ARGS = ["--append-system-prompt", ""]
 AUTO_PREFIX = "auto-"
 WORKSPACES_ROOT = Path("/workspaces")
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
@@ -130,7 +115,6 @@ class AutoWorkspaceHandler(CustomLogger):
         extra_args_to_add = []
         if not has_workspace:
             extra_args_to_add.append(SAFE_MODE_FLAG)
-            extra_args_to_add += SUPPRESS_HINT_ARGS
         effort = _extract_effort(data)
         if effort:
             extra_args_to_add += ["--effort", effort]

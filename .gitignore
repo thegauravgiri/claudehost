@@ -2,3 +2,4 @@
 ssh/
 workspaces/*
 !workspaces/.gitkeep
+claude-accounts.env
