@@ -3,3 +3,5 @@ ssh/
 workspaces/*
 !workspaces/.gitkeep
 claude-accounts.env
+__pycache__/
+*.pyc
