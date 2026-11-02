@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -28,6 +29,22 @@ QUEUE_TIMEOUT_SECONDS = {
 # Fallback cooldown after a session limit when the CLI gave no reset time.
 DEFAULT_LIMIT_COOLDOWN_SECONDS = 60
 AUTO_PREFIX = "auto-"
+
+
+MODEL_ALIASES = ("opusplan", "haiku", "sonnet", "opus")
+_ALIAS_SUFFIX = re.compile(r"(?:.+-)?(opusplan|haiku|sonnet|opus)")
+
+
+def resolve_model(model: str) -> str:
+    """Maps a gateway model name to what the claude CLI accepts. A name like
+    "mcm-claude-sonnet" (a per-account public name) resolves to "sonnet";
+    anything that isn't an alias or alias-suffixed (e.g. a full model id with
+    digits) passes through untouched."""
+    clean = model.removeprefix("openai/").removeprefix("claudebox/").removeprefix("claude-")
+    if clean in MODEL_ALIASES:
+        return clean
+    m = _ALIAS_SUFFIX.fullmatch(clean)
+    return m.group(1) if m else clean
 
 
 class WorkspaceBusyError(Exception):
@@ -259,8 +276,7 @@ class RunnerExecutor:
         ]
 
         if model:
-            clean_model = model.removeprefix("claude-").removeprefix("openai/").removeprefix("claudebox/")
-            cmd.extend(["--model", clean_model])
+            cmd.extend(["--model", resolve_model(model)])
 
         if system_prompt:
             cmd.extend(["--system-prompt", system_prompt])
