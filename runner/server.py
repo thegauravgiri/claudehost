@@ -36,6 +36,12 @@ AUTO_PREFIX = "auto-"
 # stateless calls get a hard deadline and an output-token ceiling.
 STATELESS_TIMEOUT_SECONDS = int(os.environ.get("STATELESS_TIMEOUT_SECONDS", "240"))
 STATELESS_MAX_OUTPUT_TOKENS = int(os.environ.get("STATELESS_MAX_OUTPUT_TOKENS", "32000"))
+# The CLI fails (rather than truncating) when output, including hidden
+# thinking, passes its cap, so a caller's small max_tokens (e.g. 16) is never
+# handed to it directly: the CLI gets at least this much and the reply is
+# truncated to the caller's limit afterwards, as the OpenAI API does.
+MIN_CLI_OUTPUT_TOKENS = int(os.environ.get("MIN_CLI_OUTPUT_TOKENS", "4096"))
+CHARS_PER_TOKEN = 4
 # Identical requests arriving while one is already running share its result
 # instead of each spending quota on the same prompt (client retries, fan-out).
 _inflight: dict[str, asyncio.Future] = {}
@@ -66,7 +72,10 @@ class ChatCompletionRequest(BaseModel):
     max_completion_tokens: int | None = None
 
 
-def _sse_chunks(chat_id: str, created: int, model: str, text: str, tool_calls: list | None = None):
+def _sse_chunks(
+    chat_id: str, created: int, model: str, text: str, tool_calls: list | None = None,
+    finish_reason: str = "stop",
+):
     """Fakes an OpenAI streaming response as a single content delta: the
     executor already waits for Claude Code's full response (its subprocess
     is read via communicate(), not incrementally), so there's no real
@@ -94,7 +103,7 @@ def _sse_chunks(chat_id: str, created: int, model: str, text: str, tool_calls: l
         return
     if text:
         yield frame({"content": text}, None)
-    yield frame({}, "stop")
+    yield frame({}, finish_reason)
     yield "data: [DONE]\n\n"
 
 
@@ -194,9 +203,12 @@ async def chat_completions(
         timeout = min(timeout, STATELESS_TIMEOUT_SECONDS)
 
     stateless = not resume and workspace.startswith(AUTO_PREFIX)
-    out_cap = req.max_completion_tokens or req.max_tokens
+    requested_cap = req.max_completion_tokens or req.max_tokens
+    out_cap = requested_cap
     if stateless:
         out_cap = min(out_cap or STATELESS_MAX_OUTPUT_TOKENS, STATELESS_MAX_OUTPUT_TOKENS)
+    if out_cap:
+        out_cap = max(out_cap, MIN_CLI_OUTPUT_TOKENS)
     call_env = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(out_cap)} if out_cap else None
 
     msgs = [conv.normalize(m.model_dump()) for m in req.messages]
@@ -361,7 +373,15 @@ async def chat_completions(
         raise HTTPException(status_code=502, detail=result.text or "Claude execution failed")
 
     tool_calls = conv.parse_tool_calls(result.text, schemas) if tool_names else None
-    reply = {"role": "assistant", "content": "" if tool_calls else result.text}
+    text = result.text
+    finish_reason = "tool_calls" if tool_calls else "stop"
+    if (
+        requested_cap and not tool_calls and not json_schema
+        and len(text) > requested_cap * CHARS_PER_TOKEN
+    ):
+        text = text[: requested_cap * CHARS_PER_TOKEN]
+        finish_reason = "length"
+    reply = {"role": "assistant", "content": "" if tool_calls else text}
     if tool_calls:
         reply["tool_calls"] = tool_calls
     if use_store and leader and result.session_id:
@@ -375,7 +395,7 @@ async def chat_completions(
 
     if req.stream:
         return StreamingResponse(
-            _sse_chunks(chat_id, created, req.model, result.text, tool_calls),
+            _sse_chunks(chat_id, created, req.model, text, tool_calls, finish_reason),
             media_type="text/event-stream",
         )
 
@@ -408,9 +428,9 @@ async def chat_completions(
                 "message": (
                     {"role": "assistant", "content": None, "tool_calls": tool_calls}
                     if tool_calls
-                    else {"role": "assistant", "content": result.text}
+                    else {"role": "assistant", "content": text}
                 ),
-                "finish_reason": "tool_calls" if tool_calls else "stop",
+                "finish_reason": finish_reason,
             }
         ],
         "usage": usage,
