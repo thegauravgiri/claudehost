@@ -30,7 +30,7 @@ import time
 
 import git_ops
 import state
-from core import commit_trailer_rule
+from core import SessionLimitError, commit_trailer_rule
 from hosts import github as gh_host
 
 log = logging.getLogger("orchestrator.pr_autofix")
@@ -331,6 +331,18 @@ async def run_fix_round(
             result = await orchestrator.call_agent(
                 workspace_subpath, prompt, resume=iteration > 1, response_schema=FIX_RESULT_SCHEMA,
             )
+        except SessionLimitError as err:
+            log.warning("session limit hit for %s - pausing auto mode", key)
+            await gh_host.post_pr_comment(
+                repo_full_name, pr_number,
+                f"⏸️ **{err.describe()}** - fix round {iteration} did not run and auto mode is "
+                f"paused so I don't keep retrying. @{author_login} comment `/agent auto` or "
+                "`/agent go` once the limit has reset.",
+            )
+            state.set_paused(key, True)
+            state.set_pr_loop_status(key, "gave_up")
+            state.clear_pr_loop_review(key)
+            return
         except Exception as err:  # noqa: BLE001 - always report back to the PR
             log.exception("agent call failed for %s", key)
             # httpx's own timeout/connection exceptions carry no message

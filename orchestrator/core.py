@@ -103,6 +103,20 @@ Rules:
 """
 
 
+class SessionLimitError(Exception):
+    """The runner's Claude account hit its usage window (HTTP 429)."""
+
+    def __init__(self, message: str, retry_after: int | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+    def describe(self) -> str:
+        if not self.retry_after:
+            return "Claude session limit reached"
+        mins = max(1, self.retry_after // 60)
+        return f"Claude session limit reached (resets in about {mins // 60}h{mins % 60}m)"
+
+
 @dataclass(frozen=True)
 class WorkItem:
     source: str
@@ -274,6 +288,15 @@ class Orchestrator:
             result = await self.call_agent(
                 workspace_subpath, prompt, resume=not is_first_run,
             )
+        except SessionLimitError as err:
+            log.warning("session limit hit for %s", item.external_id)
+            state.set_status(item.external_id, "idle")
+            state.set_current_instruction(item.external_id, None)
+            await post_comment(
+                item.external_id,
+                f"⏸️ **{err.describe()}** - nothing was run. Comment again after the limit resets.",
+            )
+            return
         except Exception as err:  # noqa: BLE001 - always report back to the issue
             log.exception("agent call failed for %s", item.external_id)
             state.set_status(item.external_id, "idle")
@@ -371,6 +394,9 @@ class Orchestrator:
                 headers=headers,
                 json=body,
             )
+        if resp.status_code == 429:
+            ra = resp.headers.get("Retry-After")
+            raise SessionLimitError(resp.text, int(ra) if ra and ra.isdigit() else None)
         resp.raise_for_status()
         envelope = resp.json()
         content = envelope["choices"][0]["message"]["content"]
