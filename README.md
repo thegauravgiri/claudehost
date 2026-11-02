@@ -142,6 +142,7 @@ All optional environment variables on the `runner` service:
 | `STATELESS_QUEUE_TIMEOUT_SECONDS` | `240` | Max wait for a stateless slot before HTTP 503 |
 | `STATELESS_TIMEOUT_SECONDS` | `240` | Hard deadline for a stateless call (HTTP 504) |
 | `STATELESS_MAX_OUTPUT_TOKENS` | `32000` | Output ceiling for stateless calls (the caller's `max_tokens` can only lower it) |
+| `STATELESS_CACHE_TTL` | `5m` | Prompt-cache lifetime for stateless calls (`5m` or `1h`); 5m writes are cheaper and fit back-to-back turns |
 | `CONVERSATION_TTL_SECONDS` | `3600` | How long a stateless conversation stays resumable; `0` disables resume |
 
 ## License

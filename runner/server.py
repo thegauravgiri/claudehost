@@ -41,6 +41,11 @@ STATELESS_MAX_OUTPUT_TOKENS = int(os.environ.get("STATELESS_MAX_OUTPUT_TOKENS", 
 # thinking, passes its cap, so a caller's small max_tokens (e.g. 16) is never
 # handed to it directly: the CLI gets at least this much and the reply is
 # truncated to the caller's limit afterwards, as the OpenAI API does.
+# Stateless turns arrive seconds apart, so 5-minute cache writes (~1.25x input
+# price) beat the CLI's default 1-hour ones (~2x). Agent sessions keep the
+# default since their turns can be separated by long test runs.
+STATELESS_CACHE_TTL = os.environ.get("STATELESS_CACHE_TTL", "5m")
+VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 MIN_CLI_OUTPUT_TOKENS = int(os.environ.get("MIN_CLI_OUTPUT_TOKENS", "4096"))
 CHARS_PER_TOKEN = 4
 # Identical requests arriving while one is already running share its result
@@ -67,6 +72,8 @@ class ChatCompletionRequest(BaseModel):
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any = None
     thinking: dict[str, Any] | None = None
+    reasoning_effort: str | None = None
+    reasoning: dict[str, Any] | None = None
     stream: bool = False
     temperature: float | None = None
     max_tokens: int | None = None
@@ -211,7 +218,11 @@ async def chat_completions(
         out_cap = min(out_cap or STATELESS_MAX_OUTPUT_TOKENS, STATELESS_MAX_OUTPUT_TOKENS)
     if out_cap:
         out_cap = max(out_cap, MIN_CLI_OUTPUT_TOKENS)
-    call_env = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(out_cap)} if out_cap else None
+    call_env: dict[str, str] = {}
+    if out_cap:
+        call_env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(out_cap)
+    if stateless and STATELESS_CACHE_TTL:
+        call_env["CLAUDE_CODE_PROMPT_CACHE_TTL"] = STATELESS_CACHE_TTL
 
     msgs = [conv.normalize(m.model_dump()) for m in req.messages]
     system_parts = [m["content"] for m in msgs if m["role"] == "system"]
@@ -222,6 +233,11 @@ async def chat_completions(
     tool_names = set(schemas)
     if tool_names:
         system_parts.append(conv.tools_prompt(tools, req.tool_choice))
+    # OpenAI-style reasoning effort maps to the CLI's --effort. The LiteLLM
+    # callback does this too, but only for the four standard model names.
+    effort = (req.reasoning or {}).get("effort") or req.reasoning_effort
+    if isinstance(effort, str) and effort.lower() in VALID_EFFORT_LEVELS and "--effort" not in extra_args:
+        extra_args = [*extra_args, "--effort", effort.lower()]
     # No CLI flag turns thinking off entirely; the closest is the lowest effort
     # level (measured ~30% fewer thinking tokens), used only if the caller
     # asked for no thinking and didn't pick an effort itself.
